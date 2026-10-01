@@ -3,11 +3,18 @@
 Supports both an interactive session and non-interactive subcommands so
 the tool can be scripted:
 
-    hdhub4u                     interactive search
-    hdhub4u search "big boss"    print matches, no prompts
+    hdhub4u                     interactive live search
+    hdhub4u search "big boss"    search the site, no prompts
+    hdhub4u browse "big boss"    interactive pick, list and download
+    hdhub4u search "x" --local   search the offline index instead
     hdhub4u index               rebuild the local index
     hdhub4u status              show where data is stored
     hdhub4u links prune         drop expired cached resolutions
+
+``search`` and ``browse`` talk to the live site. The offline index
+built by ``index`` is still available behind ``--local`` and the
+``browse`` subcommand, but it is only correct up to the moment it was
+built, so it is not the default.
 """
 
 from __future__ import annotations
@@ -16,9 +23,10 @@ import argparse
 import sys
 
 from .browser import BrowserSession, BrowserUnavailable
-from .cli import main as interactive_main
 from .cli import show_status
 from .database import get_media_count, placeholder_title_count
+from .flow import interactive as live_interactive
+from .flow import run_search as live_search
 from .indexer import build_index
 from .link_cache import LinkCache
 from .logging_setup import configure_logging
@@ -32,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hdhub4u",
         description=(
-            "Search and download from the local media index."
+            "Search and download from the live site, or from a "
+            "local index with --local."
         ),
     )
 
@@ -102,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     search_parser = subparsers.add_parser(
         "search",
-        help="search the index without prompts",
+        help="search the site without prompts",
     )
 
     search_parser.add_argument(
@@ -115,6 +124,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="maximum results to print",
+    )
+
+    search_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="search the offline index instead",
+    )
+
+    browse_parser = subparsers.add_parser(
+        "browse",
+        help="interactively browse and download",
+    )
+
+    browse_parser.add_argument(
+        "query",
+        nargs="?",
+        default="",
+        help="title to start with (optional)",
     )
 
     subparsers.add_parser(
@@ -140,7 +167,12 @@ def run_search(
     query: str,
     limit: int,
 ) -> int:
-    """Print search results and return an exit code."""
+    """
+    Print results from the offline index.
+
+    Kept as a plain-text helper for the ``--local`` path and for
+    callers that want index output without the live tables.
+    """
 
     results = search_media(
         query,
@@ -288,9 +320,16 @@ def main(
         )
 
     if args.command == "search":
-        return run_search(
+        if getattr(args, "local", False):
+            return run_search(
+                args.query,
+                args.limit,
+            )
+
+        return live_search(
             args.query,
-            args.limit,
+            limit=args.limit,
+            interactive=False,
         )
 
     if args.command == "status":
@@ -299,9 +338,12 @@ def main(
     if args.command == "links":
         return run_links(args.action)
 
-    interactive_main()
+    if args.command == "browse":
+        return live_interactive(
+            getattr(args, "query", "") or "",
+        )
 
-    return 0
+    return live_interactive()
 
 
 def run() -> int:
