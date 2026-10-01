@@ -130,7 +130,7 @@ def browser_status() -> str:
 
             browser.close()
 
-    except Exception as error:
+    except Exception:
         return (
             "playwright present but no browser binary: "
             "run 'playwright install chromium'"

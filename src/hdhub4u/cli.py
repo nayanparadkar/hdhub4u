@@ -7,7 +7,6 @@ from .database import (
     get_media_count,
     initialize_database,
     newest_media,
-    placeholder_title_count,
 )
 from .downloader import (
     DownloadJob,

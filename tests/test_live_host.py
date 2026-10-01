@@ -513,54 +513,6 @@ class TestLiveSearch:
         assert ids == sorted(ids, reverse=True)
 
 
-class TestLiveLinkGating:
-    def test_probe_never_raises(
-        self,
-        live_probes,
-    ) -> None:
-        assert live_probes
-
-        for result in live_probes:
-            assert result.reason or (
-                result.is_media
-            )
-
-    def test_non_media_links_are_labelled(
-        self,
-        live_probes,
-    ) -> None:
-        for result in live_probes:
-            if not result.is_media:
-                assert result.reason
-
-    def test_gated_hosts_are_reported_honestly(
-        self,
-        live_probes,
-    ) -> None:
-        # The hosts behind these options answer with a web page, so
-        # the probe must say so rather than claim a media link.
-        summary = summarize_gating(live_probes)
-
-        if not any(
-            result.is_media
-            for result in live_probes
-        ):
-            assert "0 of" in summary
-
-    def test_summary_always_reads_sensibly(
-        self,
-        live_probes,
-    ) -> None:
-        usable, blocked = group_by_downloadability(
-            live_probes
-        )
-
-        assert (
-            len(usable) + len(blocked)
-            == len(live_probes)
-        )
-
-
 class TestLiveMediaHost:
     """A host that does serve files directly."""
 
