@@ -243,7 +243,7 @@ def sniff_container(
     if head[:4] == b"RIFF":
         return _resolve_riff_form(head)
 
-    if head[:1] == _MPEG_TS_SYNC_BYTE and is_mpeg_ts_sync_aligned(head):
+    if is_mpeg_ts_sync_aligned(head):
         return "mpeg-ts"
 
     return ""
@@ -527,6 +527,7 @@ def verify_media(
         logger.debug(
             "%s: container=%s despite content-type %r",
             url,
+            container,
             content_type,
         )
 
@@ -559,13 +560,15 @@ def _read_probe_prefix(
     :data:`PROBE_BYTES`, and also if the body simply ends there.
     """
 
-    try:
-        chunks: list[bytes] = []
+    chunks: list[bytes] = []
+    total = 0
 
+    try:
         for chunk in response.iter_bytes():
             chunks.append(chunk)
+            total += len(chunk)
 
-            if sum(map(len, chunks)) >= PROBE_BYTES:
+            if total >= PROBE_BYTES:
                 break
 
         return b"".join(chunks)[:PROBE_BYTES]
@@ -943,11 +946,13 @@ def _cleaned_href(
     """
     Turn an ``href`` read out of markup into a usable URL.
 
-    Three layers sit between the markup and a request: the page was
-    matched as text, so ``&amp;`` is still escaped and has to come
-    back; it may be percent-encoded, which is a URL layer rather
-    than an HTML one and is undone last; and it may be relative,
-    which needs the address of the page it was read from.
+    Three layers sit between the markup and a request, undone in
+    this order. The page was matched as text, so an ``&`` in it is
+    still written ``&amp;`` and is an HTML escape first. The
+    address may be relative, which needs the page it was read from.
+    Percent-encoding is the outermost layer and is removed last, so
+    an encoded ``%26`` does not turn into a query separator on the
+    way through.
 
     Args:
         href: The attribute value as written in the markup.
@@ -1058,7 +1063,7 @@ def host_suffix(
 def _as_resolution_error(
     option: MediaOption,
     error: Exception,
-    strategy: str,
+    strategy: str = "",
 ) -> ResolutionError:
     """
     Report a failure against one option as a resolution error.
@@ -1067,12 +1072,23 @@ def _as_resolution_error(
     the cause, so a traceback still explains what actually went
     wrong. The link is handed back to a caller rather than raised,
     so the chain has to be attached by hand.
+
+    Args:
+        option: The option the failure belongs to.
+        error: What went wrong.
+        strategy: The strategy that failed, where the caller knows
+            it. Otherwise the failure's own name is used, since a
+            gate that got as far as naming itself should keep it.
+
+    Returns:
+        An error carrying the message, the option's address and
+        the original as its cause.
     """
 
     reported = ResolutionError(
         str(error),
         url=option.url,
-        strategy=strategy,
+        strategy=strategy or getattr(error, "strategy", ""),
         content_type=getattr(error, "content_type", "") or "",
     )
 
@@ -1244,11 +1260,7 @@ def unlock_many(
                 results.append(
                     (
                         option,
-                        _as_resolution_error(
-                            option,
-                            error,
-                            strategy=option.kind,
-                        ),
+                        _as_resolution_error(option, error),
                     )
                 )
 
