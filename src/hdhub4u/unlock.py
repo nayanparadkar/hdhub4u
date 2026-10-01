@@ -1063,16 +1063,22 @@ def _as_resolution_error(
     """
     Report a failure against one option as a resolution error.
 
-    Only the message is carried over; the original stays the cause
-    so the traceback still explains what actually went wrong.
+    Only the message is carried over; the original is attached as
+    the cause, so a traceback still explains what actually went
+    wrong. The link is handed back to a caller rather than raised,
+    so the chain has to be attached by hand.
     """
 
-    return ResolutionError(
+    reported = ResolutionError(
         str(error),
         url=option.url,
         strategy=strategy,
         content_type=getattr(error, "content_type", "") or "",
     )
+
+    reported.__cause__ = error
+
+    return reported
 
 
 def unlock(
