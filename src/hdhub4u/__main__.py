@@ -23,8 +23,7 @@ import argparse
 import sys
 
 from .browser import BrowserSession, BrowserUnavailable
-from .cli import show_status
-from .database import get_media_count, placeholder_title_count
+from .errors import HdHubError
 from .flow import interactive as live_interactive
 from .flow import run_search as live_search
 from .indexer import build_index
@@ -32,6 +31,7 @@ from .link_cache import LinkCache
 from .logging_setup import configure_logging
 from .project import get_link_cache_path
 from .search import search_media
+from .ui import print_error, show_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,15 +56,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(
         dest="command",
-    )
-
-    parser.add_argument(
-        "--browser",
-        action="store_true",
-        help=(
-            "render pages in a real browser where a "
-            "command supports it"
-        ),
     )
 
     index_parser = subparsers.add_parser(
@@ -199,13 +190,6 @@ def run_search(
 
 def run_status() -> int:
     """Print index statistics and data locations."""
-
-    print(f"Indexed items      : {get_media_count()}")
-
-    print(
-        "Placeholder titles: "
-        f"{placeholder_title_count()}"
-    )
 
     show_status()
 
@@ -347,10 +331,24 @@ def main(
 
 
 def run() -> int:
-    """Console script wrapper."""
+    """
+    Console script wrapper.
+
+    Everything this program raises on purpose derives from
+    :class:`HdHubError` and already carries a message written to be
+    shown to a person. Letting one of those escape printed a Python
+    traceback over the message, which is the least useful way to
+    report that a site was unreachable. An interrupt is not a failure
+    and exits by the shell's convention instead.
+    """
 
     try:
         return main()
+
+    except HdHubError as error:
+        print_error(str(error))
+
+        return 1
 
     except KeyboardInterrupt:
         print()

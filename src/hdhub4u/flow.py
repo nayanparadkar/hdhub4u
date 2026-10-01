@@ -25,6 +25,7 @@ import httpx
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from . import catalog, unlock
 from .catalog import (
@@ -47,6 +48,35 @@ from .ui import clear_screen, pause, print_error, print_header
 console = Console()
 
 APP_TITLE = "HDHUB4U"
+
+#: Extensions a saved file is allowed to carry, taken from the
+#: containers the probe recognises plus the few names a server may
+#: legitimately use for the same bytes. Anything else in a URL is a
+#: page or an executable, not a video.
+MEDIA_EXTENSIONS = frozenset(
+    {
+        ".mkv",
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".flv",
+        ".ogv",
+        ".ogg",
+        ".webm",
+        ".avi",
+        ".mpg",
+        ".mpeg",
+        ".ts",
+        ".m2ts",
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".flac",
+        ".wav",
+        ".srt",
+        ".sub",
+    }
+)
 
 QUIT_WORDS = frozenset({"q", "quit", "exit"})
 BACK_WORDS = frozenset({"b", "back"})
@@ -96,11 +126,15 @@ def render_results(
     """Print a numbered result table."""
 
     if not items:
+        note = Text(
+            f"Nothing matched '{query}'.\n"
+            "Try a shorter spelling, or the "
+            "original English title.",
+        )
+
         console.print(
             Panel(
-                f"Nothing matched '{query}'.\n"
-                "Try a shorter spelling, or the "
-                "original English title.",
+                note,
                 border_style="yellow",
                 title="No results",
             )
@@ -121,10 +155,13 @@ def render_results(
     table.add_column("Quality", width=18)
 
     for number, item in enumerate(items, start=1):
+        # Titles are site-controlled, so the cell is a Text: Rich
+        # would otherwise read a title of "[/]" as markup and drop
+        # it from the table.
         table.add_row(
             str(number),
-            item.short_title(56),
-            item.year or "-",
+            Text(item.short_title(56)),
+            Text(item.year or "-"),
             _kind_label(item),
             _quality_label(item),
         )
@@ -196,7 +233,10 @@ def _parse_choice(
     if value in BACK_WORDS:
         return "back"
 
-    if value.isdigit() and 1 <= int(value) <= count:
+    # isdecimal, not isdigit: "²".isdigit() is True and "²" as an int
+    # raises ValueError, which would end the session on a keystroke
+    # rather than ask again.
+    if value.isdecimal() and 1 <= int(value) <= count:
         return value
 
     return "again"
@@ -262,12 +302,19 @@ def render_options(
 ) -> None:
     """Print the option table for a chosen title."""
 
+    # The title and the address are site-controlled, so both are
+    # Text. Read as markup, a title of "[/]" is swallowed and one of
+    # "[red]" restyles the panel.
+    heading = Text()
+    heading.append(item.title)
+    heading.append("\n")
+    heading.append(item.url, style="dim")
+
     console.print(
         Panel(
-            item.title,
+            heading,
             border_style="cyan",
             title="Selected",
-            subtitle=item.url,
         )
     )
 
@@ -302,12 +349,14 @@ def render_options(
             else "Stream"
         )
 
+        # label and size_label are scraped from a post page, so the
+        # cells are Text rather than markup.
         table.add_row(
             str(number),
-            option.label[:34],
-            option.size_label or "-",
+            Text(option.label[:34]),
+            Text(option.size_label or "-"),
             kind,
-            option.host[:20],
+            Text(option.host[:20]),
         )
 
     console.print(table)
@@ -360,7 +409,7 @@ def choose_option(
 
             return matches[0]
 
-        if not value.isdigit() or not 1 <= int(value) <= len(
+        if not value.isdecimal() or not 1 <= int(value) <= len(
             options
         ):
             print_error("Enter an option number from the list.")
@@ -382,9 +431,14 @@ def start_download(
     declined or the gate could not be opened.
     """
 
+    # option.label is text scraped off a page, so it is not
+    # interpolated into a markup string.
     console.print(
-        f"[dim]opening {option.host} gate for "
-        f"{option.label}...[/dim]"
+        Text.assemble(
+            (f"opening {option.host} gate for ", "dim"),
+            (option.label, "dim"),
+            ("...", "dim"),
+        )
     )
 
     try:
@@ -400,12 +454,18 @@ def start_download(
         print_error(f"Could not open that link.\n{error}")
         return False
 
-    console.print(
-        f"[green]found[/green] {link.container or 'media'} file · "
-        f"{unlock.format_size(link.size_bytes)}"
-    )
-    console.print(f"[dim]{link.filename}[/dim]")
-    console.print(f"[dim]{link.url}[/dim]")
+    # The filename and the address both come from a third-party
+    # page, so they are printed as Text. Interpolated into a markup
+    # string, a title containing "[/]" or "[red]" was read as a style
+    # and swallowed, and a filename could repaint the line.
+    found = Text()
+    found.append("found ", style="green")
+    found.append(f"{link.container or 'media'} file")
+    found.append(" · ")
+    found.append(unlock.format_size(link.size_bytes))
+    console.print(found)
+    console.print(Text(link.filename, style="dim"))
+    console.print(Text(link.url, style="dim"))
 
     if not _ask("Start download? [y/N] "):
         return False
@@ -448,7 +508,10 @@ def start_download(
 
     print()
     console.print(
-        f"[bold green]Saved[/bold green] {path}"
+        Text.assemble(
+            ("Saved ", "bold green"),
+            (str(path), ""),
+        )
     )
     console.print(
         f"[dim]{unlock.format_size(path.stat().st_size)}[/dim]"
@@ -461,13 +524,23 @@ def _suffix(
     filename: str,
     container: str,
 ) -> str:
-    """Return the extension to enforce on the saved file."""
+    """
+    Return the extension to enforce on the saved file.
+
+    Only a known media extension from the URL is believed. A filename
+    is server-controlled, and taking whatever its last dot-separated
+    run happens to be saved the file as ``.php``, ``.html`` or
+    ``.exe`` when a gate named its page that way, which is both a lie
+    about the content and a good way to be talked into running it.
+    Anything unrecognised falls back to the extension belonging to
+    the container the bytes were measured as.
+    """
 
     from pathlib import Path
 
-    suffix = Path(filename).suffix
+    suffix = Path(filename).suffix.lower()
 
-    if suffix:
+    if suffix in MEDIA_EXTENSIONS:
         return suffix
 
     return unlock.extension_for(container)
@@ -498,10 +571,15 @@ def show_title(
         return "back"
 
     if option.kind != DOWNLOAD_KIND:
+        stream_notice = Text(
+            "That option is a stream, not a file.\n"
+            "Open it in a browser:\n",
+        )
+        stream_notice.append(option.url)
+
         console.print(
             Panel(
-                "That option is a stream, not a file.\n"
-                f"Open it in a browser:\n{option.url}",
+                stream_notice,
                 border_style="yellow",
                 title="Stream only",
             )
@@ -644,7 +722,11 @@ def run_search(
             client=http_client,
         )
 
-        return 0 if outcome in {QUIT, BACK} else 0
+        # Quitting is the user finishing, which is a success. Any
+        # other outcome means the loop returned early -- a search
+        # error, say -- and reporting 0 for that is how a script
+        # driving this is told a download is there when none is.
+        return 0 if outcome == QUIT else 1
 
     except QuitFlow:
         return 0

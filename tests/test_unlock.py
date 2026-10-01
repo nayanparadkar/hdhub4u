@@ -36,15 +36,20 @@ MP4_PREFIX = (
     + b"\x00\x00\x02\x00isomiso2avc1mp41"
 )
 MPEG_TS_PACKET_SIZE = 188
+MPEG_TS_QUORUM = unlock_module._MPEG_TS_QUORUM
 
 
-def _mpeg_ts_prefix(packets: int = 4) -> bytes:
+def _mpeg_ts_prefix(packets: int = MPEG_TS_QUORUM) -> bytes:
     """
     Build a plausible transport stream prefix.
 
     Every packet opens with the sync byte and the packets follow
     one another at a fixed stride, which is the only part of a
     stream that can be told from a body of text.
+
+    The default is the quorum the module demands, so a prefix built
+    here is one it has to accept; pass fewer to build one it must
+    decline.
     """
 
     packet = b"\x47" + b"\x00" * (MPEG_TS_PACKET_SIZE - 1)
@@ -170,33 +175,60 @@ class TestSniffContainer:
 
     def test_detects_a_real_transport_stream(self) -> None:
         """
-        A second sync byte one packet later is what separates a
-        stream from anything else that starts with ``G``.
+        A quorum of sync bytes at the packet stride is what separates
+        a stream from anything else that starts with ``G``.
         """
 
         assert sniff_container(_mpeg_ts_prefix()) == "mpeg-ts"
 
-    def test_detects_a_short_but_aligned_stream_prefix(self) -> None:
+    def test_a_prefix_short_of_the_quorum_is_not_a_stream(self) -> None:
         """
-        189 bytes hold the leading sync byte and the next one. That
-        is the minimum this module accepts, and it accepts it.
+        The old two-sync-byte test still lets prose through: the byte
+        is also the letter ``G``, so any 188 bytes of English have a
+        one-in-fifty chance of carrying a second one. Requiring a
+        quorum of eight means eight independent chances instead,
+        which is a million to one rather than fifty to one.
         """
 
-        assert (
-            sniff_container(_mpeg_ts_prefix()[:MPEG_TS_PACKET_SIZE + 1])
-            == "mpeg-ts"
-        )
+        aligned_but_short = _mpeg_ts_prefix()[:MPEG_TS_PACKET_SIZE + 1]
 
-    def test_a_prefix_without_the_second_sync_byte_is_not_a_stream(
+        assert sniff_container(aligned_but_short) == ""
+
+    def test_prose_is_not_a_stream(self) -> None:
+        """
+        The advertisement this module exists to reject. Pad it to a
+        probe's worth so that the length requirement cannot be what
+        turns it away, and assert it is the bytes that do.
+        """
+
+        prose = (
+            b"Get unlimited premium access now. No thanks, not today."
+        ) * 12
+        padded = prose[:unlock_module.PROBE_BYTES]
+
+        assert sniff_container(padded) == ""
+
+    def test_a_gif_is_not_a_stream(self) -> None:
+        """
+        ``GIF89a`` opens with the sync byte and then the letter of
+        the format, but a GIF is not a packet of 188 bytes.
+        """
+
+        head = b"GIF89a" + b"\x00" * (unlock_module.PROBE_BYTES - 6)
+
+        assert sniff_container(head) == ""
+
+    def test_a_prefix_without_a_stride_of_sync_bytes_is_not_a_stream(
         self,
     ) -> None:
         """
-        Long enough to hold the second packet, but that packet does
-        not start where a packet has to start.
+        Long enough to hold the quorum, but the packets do not
+        start where packets have to start.
         """
 
         head = bytearray(_mpeg_ts_prefix())
-        head[MPEG_TS_PACKET_SIZE] = 0x48
+        for index in range(1, MPEG_TS_QUORUM):
+            head[index * MPEG_TS_PACKET_SIZE] = 0x48
 
         assert sniff_container(bytes(head)) == ""
 
@@ -608,12 +640,18 @@ class TestVerifyMedia:
         """
         Callers depend on the None, but a None alone leaves them
         telling the user the host returned web pages even when the
-        host never answered at all. The reason is logged, so the
-        diagnosis survives.
+        host never answered at all. The reason is recorded and
+        logged, so the diagnosis survives.
+
+        The retries wrap three timeouts into one ``NetworkError``
+        before this sees it, so the type named here is that one, not
+        the ``ConnectTimeout`` underneath it.
         """
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectTimeout("connection timed out")
+
+        reasons: list[str] = []
 
         with caplog.at_level(
             logging.DEBUG,
@@ -622,10 +660,12 @@ class TestVerifyMedia:
             link = verify_media(
                 _client(handler),
                 "https://cdn.test/a.mkv",
+                reasons=reasons,
             )
 
         assert link is None
-        assert "ConnectTimeout" in caplog.text
+        assert len(reasons) == 1
+        assert "timed out" in reasons[0]
         assert "cdn.test/a.mkv" in caplog.text
 
     def test_a_web_page_is_logged_as_content_not_transport(
@@ -670,20 +710,91 @@ class TestReadProbePrefix:
 
         response = httpx.Response(206, stream=body)
 
-        assert (
-            unlock_module._read_probe_prefix(response)
-            == MATROSKA_PREFIX
-        )
+        prefix, complete = unlock_module._read_probe_prefix(response)
+
+        assert prefix == MATROSKA_PREFIX
+        assert complete is True
 
     def test_reads_no_further_than_the_probe_size(self) -> None:
         body = _Dribble(MATROSKA_PREFIX + b"\x00" * 8_192)
 
         response = httpx.Response(200, stream=body)
 
-        prefix = unlock_module._read_probe_prefix(response)
+        prefix, complete = unlock_module._read_probe_prefix(response)
 
         assert len(prefix) == unlock_module.PROBE_BYTES
         assert body.served <= unlock_module.PROBE_BYTES + 64
+        assert complete is True
+
+    def test_a_range_ignoring_server_costs_one_probe(self) -> None:
+        """
+        The regression that made the byte cap inert. Probing used
+        ``client.get``, which buffers the whole body before this
+        function saw a byte, so a mirror serving a two megabyte
+        object transferred all of it -- and a mirror serving four
+        gigabytes under a video content type would have done the
+        same, into memory.
+
+        This drives the real client so that the count is of bytes
+        off the wire, not bytes this function chose to keep.
+        """
+
+        class Endless(httpx.SyncByteStream):
+            def __init__(self) -> None:
+                self.served = 0
+
+            def __iter__(self):
+                block = b"\x00" * 65_536
+                while self.served < 2 * 1024 * 1024:
+                    self.served += len(block)
+                    yield block
+
+        for status, headers in (
+            (206, {"content-range": "bytes 0-4095/2097152"}),
+            (200, {"content-length": "2097152"}),
+        ):
+            body = Endless()
+
+            def handler(
+                request: httpx.Request,
+                body: Endless = body,
+                status: int = status,
+                headers: dict[str, str] = headers,
+            ) -> httpx.Response:
+                return httpx.Response(
+                    status,
+                    headers=headers,
+                    stream=body,
+                    request=request,
+                )
+
+            client = httpx.Client(
+                transport=httpx.MockTransport(handler),
+                follow_redirects=True,
+            )
+
+            verify_media(client, "https://cdn.test/big.mkv")
+
+            # One chunk of slack: the reader is allowed the piece it
+            # is in the middle of, not a whole body.
+            assert body.served <= 65_536, status
+            assert body.served < 2 * 1024 * 1024, status
+
+    def test_a_short_body_reads_cleanly(self) -> None:
+        """
+        A body that ends inside the probe is not a failure. The flag
+        reports whether the transfer broke, not whether the object
+        filled the window, and a small file legitimately does not.
+        """
+
+        body = _Dribble(MATROSKA_PREFIX)
+
+        response = httpx.Response(200, stream=body)
+
+        prefix, complete = unlock_module._read_probe_prefix(response)
+
+        assert prefix == MATROSKA_PREFIX
+        assert complete is True
 
     def test_a_broken_body_reads_as_nothing(self) -> None:
         class Broken(httpx.SyncByteStream):
@@ -693,7 +804,10 @@ class TestReadProbePrefix:
 
         response = httpx.Response(206, stream=Broken())
 
-        assert unlock_module._read_probe_prefix(response) == b""
+        prefix, complete = unlock_module._read_probe_prefix(response)
+
+        assert prefix == b""
+        assert complete is False
 
 
 def _wrapped(file_url: str) -> str:
@@ -1429,12 +1543,6 @@ class TestUnlock:
             attempts.append("hubcdn")
             raise NetworkError("could not open the gate")
 
-        monkeypatch.setattr(
-            unlock_module,
-            "unlock_hubcdn",
-            failing_gate,
-        )
-
         def hubdrive_gate(client, option):
             attempts.append("hubdrive")
             return UnlockedLink(
@@ -1444,10 +1552,16 @@ class TestUnlock:
                 strategy="direct",
             )
 
+        # The dispatch table is built once at import, so the seam is
+        # the table rather than the module attributes it was made
+        # from.
         monkeypatch.setattr(
             unlock_module,
-            "unlock_hubdrive",
-            hubdrive_gate,
+            "_STRATEGIES",
+            {
+                "hubcdn": failing_gate,
+                "hubdrive": hubdrive_gate,
+            },
         )
 
         link = unlock(
@@ -1463,9 +1577,10 @@ class TestUnlock:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """
-        Nothing resolved, so the caller gets one resolution error,
-        and it carries the message of the strategy that got
-        furthest rather than a bare "could not be opened".
+        Nothing resolved, so the caller gets one resolution error
+        carrying the last strategy's message, which is more use than
+        a bare "could not be opened". "Last", not "furthest":
+        strategies are ordered by host, not by how far they got.
         """
 
         monkeypatch.setattr(
@@ -1479,13 +1594,11 @@ class TestUnlock:
 
         monkeypatch.setattr(
             unlock_module,
-            "unlock_hubcdn",
-            failing_gate,
-        )
-        monkeypatch.setattr(
-            unlock_module,
-            "unlock_hubdrive",
-            failing_gate,
+            "_STRATEGIES",
+            {
+                "hubcdn": failing_gate,
+                "hubdrive": failing_gate,
+            },
         )
 
         with pytest.raises(ResolutionError) as info:

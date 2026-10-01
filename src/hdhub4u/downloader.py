@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import IO, Callable
 
 import httpx
 
@@ -240,16 +241,105 @@ def download_file(
     output_path = job.output_path
     partial_path = job.partial_path
 
-    existing_size = (
-        partial_path.stat().st_size
-        if partial_path.exists()
-        else 0
-    )
-
     if output_path.exists():
         raise DownloadError(
             f"Already downloaded: {output_path.name}"
         )
+
+    # Claim the .part file before looking at it. Two downloads of the
+    # same release at once used to read the same offset, each send a
+    # Range from it, and each append its own body to the same file,
+    # so the result was two films interleaved and one chunk too long.
+    # O_EXCL makes the claim atomic; the loser is told what happened
+    # rather than corrupting the winner.
+    claim = _claim_partial(partial_path)
+
+    try:
+        existing_size = (
+            partial_path.stat().st_size
+            if partial_path.exists()
+            else 0
+        )
+
+        return _stream_to_file(
+            job,
+            output_path,
+            partial_path,
+            existing_size,
+            progress_callback,
+        )
+
+    finally:
+        claim.close()
+
+
+def _claim_partial(
+    partial_path: Path,
+) -> IO[bytes]:
+    """
+    Take an exclusive claim on a job's ``.part`` file.
+
+    An advisory lock on a sidecar file, not an exclusive create: a
+    ``.part`` that already exists is precisely the resume case, and
+    refusing to open it would make resuming impossible. What has to
+    be prevented is a second *live* writer, and a lock says that
+    without saying anything about files left behind by a run that
+    died.
+
+    The lock is released by the kernel when the process ends, so a
+    transfer killed outright does not leave the next one blocked.
+
+    Returns:
+        The open lock file, which the caller closes when the
+        transfer ends.
+
+    Raises:
+        DownloadError: when another transfer already holds it.
+    """
+
+    lock_path = partial_path.with_name(
+        f"{partial_path.name}.lock"
+    )
+
+    handle = lock_path.open("a+b")
+
+    try:
+        fcntl.flock(
+            handle.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+
+    except OSError as error:
+        handle.close()
+
+        raise DownloadError(
+            f"Another download of "
+            f"{partial_path.name[: -len('.part')]} is already "
+            f"running in {partial_path.parent}. Wait for it to "
+            f"finish, or stop it first."
+        ) from error
+
+    return handle
+
+
+def _stream_to_file(
+    job: DownloadJob,
+    output_path: Path,
+    partial_path: Path,
+    existing_size: int,
+    progress_callback: Callable[
+        [int, int | None],
+        None,
+    ] | None,
+) -> Path:
+    """
+    Transfer the body, with :func:`download_file` holding the claim.
+
+    Split out so that taking and releasing the claim on the ``.part``
+    file is one readable pair around the transfer, rather than the
+    claim and its release being interleaved with the body of the
+    function that does the work.
+    """
 
     headers = {
         "User-Agent": DOWNLOADER_USER_AGENT,

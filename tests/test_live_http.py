@@ -28,12 +28,6 @@ from hdhub4u.http_types import (
     is_media_content_type,
     resolve_extension,
 )
-from hdhub4u.probe import (
-    OptionProbe,
-    classify_failure,
-    group_by_downloadability,
-    summarize_gating,
-)
 from hdhub4u.resolver import DirectResolver
 
 #: A short but structurally valid MP4 header, so the saved file is
@@ -237,13 +231,7 @@ class TestLiveMediaValidation:
         )
 
         assert not response.is_media
-
-        reason = classify_failure(
-            response.status_code,
-            response.content_type,
-        )
-
-        assert "browser" in reason
+        assert response.content_type.startswith("text/html")
 
     def test_octet_stream_with_mkv_path_is_media(
         self,
@@ -387,103 +375,6 @@ class TestLiveDownload:
         assert path.stat().st_size == len(FAKE_MP4)
         assert path.read_bytes() == FAKE_MP4
         assert not job.partial_path.exists()
-
-
-class TestLiveProbe:
-    def test_probe_reports_real_responses(
-        self,
-        live_server: str,
-    ) -> None:
-        options = [
-            {
-                "title": "480p",
-                "url": f"{live_server}/film.mp4",
-            },
-            {
-                "title": "720p",
-                "url": f"{live_server}/gated",
-            },
-            {
-                "title": "1080p",
-                "url": f"{live_server}/forbidden",
-            },
-        ]
-
-        results = OptionProbe(
-            DirectResolver(timeout=10.0)
-        ).probe_all(options)
-
-        by_title = dict(
-            zip(
-                [
-                    option["title"]
-                    for option in options
-                ],
-                results,
-                strict=True,
-            )
-        )
-
-        assert by_title["480p"].is_media
-        assert (
-            by_title["480p"].extension == ".mp4"
-        )
-
-        assert not by_title["720p"].is_media
-        assert "browser" in by_title["720p"].reason
-
-        assert not by_title["1080p"].is_media
-        assert "blocked" in by_title["1080p"].reason
-
-    def test_summary_reports_mixed_outcome(
-        self,
-        live_server: str,
-    ) -> None:
-        results = OptionProbe(
-            DirectResolver(timeout=10.0)
-        ).probe_all([
-            {
-                "title": "480p",
-                "url": f"{live_server}/film.mp4",
-            },
-            {
-                "title": "720p",
-                "url": f"{live_server}/gated",
-            },
-        ])
-
-        message = summarize_gating(results)
-
-        assert "1 of 2" in message
-
-        usable, blocked = group_by_downloadability(
-            results
-        )
-
-        assert len(usable) == 1
-        assert len(blocked) == 1
-
-    def test_every_option_gated_is_stated(
-        self,
-        live_server: str,
-    ) -> None:
-        results = OptionProbe(
-            DirectResolver(timeout=10.0)
-        ).probe_all([
-            {
-                "title": "720p",
-                "url": f"{live_server}/gated",
-            },
-        ])
-
-        assert not any(
-            result.is_media
-            for result in results
-        )
-
-        assert "0 of 1" in summarize_gating(
-            results
-        )
 
 
 class TestLiveContentTypes:

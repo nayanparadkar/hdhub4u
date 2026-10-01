@@ -15,9 +15,18 @@ console = Console()
 
 
 def clear_screen() -> None:
-    """Clear the terminal, ignoring failure on non-tty output."""
+    """
+    Clear the terminal and home the cursor.
 
-    os.system("clear")
+    Written out as an escape sequence rather than shelling out to
+    ``clear``: that put a path through the shell, forked a process to
+    run a program that may not be installed, and printed ``sh: 1:
+    clear: not found`` into the output on a system without it.
+    """
+
+    if console.is_terminal:
+        console.file.write("\x1b[2J\x1b[H")
+        console.file.flush()
 
 
 def pause(
@@ -362,9 +371,20 @@ def print_inspection(
 def print_error(
     message: str,
 ) -> None:
+    """
+    Show an error to the user.
+
+    The message is a Rich ``Text``, not a markup string, because it
+    carries text this program did not write: server names, page
+    titles, and exception messages naming URLs. A title containing
+    ``[red]`` or a tag such as ``[/]`` used to be read as markup and
+    swallowed, or printed as a style, which is both a lie about what
+    the site said and a way for the text to rearrange the panel.
+    """
+
     console.print(
         Panel(
-            message,
+            Text(message),
             title="Error",
             border_style="red",
         )
@@ -413,3 +433,61 @@ def open_url(
     """Open a URL in the default browser."""
 
     return webbrowser.open(url)
+
+
+def show_status() -> None:
+    """
+    Report where the program keeps its data and what it can reach.
+
+    Browser availability is part of this because a crawl without a
+    browser silently produces placeholder titles rather than real
+    ones, and the only symptom is a worse index. Saying so here is
+    cheaper than debugging that later.
+    """
+
+    from .browser import browser_status
+    from .database import get_media_count, placeholder_title_count
+    from .indexer import USE_BROWSER_ENV
+    from .link_cache import LinkCache
+    from .project import (
+        get_database_path,
+        get_downloads_dir,
+        get_link_cache_path,
+    )
+
+    cache_path = get_link_cache_path()
+
+    print()
+    print(f"Index            : {get_database_path()}")
+    print(
+        "Link cache       : "
+        f"{cache_path} "
+        f"({'present' if cache_path.exists() else 'empty'})"
+    )
+    print(f"Downloads        : {get_downloads_dir()}")
+    print(
+        "Indexed items      : "
+        f"{get_media_count()}"
+    )
+    print(
+        "Placeholder titles : "
+        f"{placeholder_title_count()}"
+    )
+    print(
+        "Cached links     : "
+        f"{LinkCache(cache_path).count()}"
+    )
+    print(f"Browser          : {browser_status()}")
+    rendering_on = (
+        os.environ.get(USE_BROWSER_ENV, "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+
+    print(
+        "Page rendering   : "
+        f"{'on' if rendering_on else 'off'} "
+        f"(set {USE_BROWSER_ENV}=1)"
+    )
+    print()

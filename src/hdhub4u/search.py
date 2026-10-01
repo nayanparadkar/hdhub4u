@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from .database import connection
+from .database import connection, initialize_database
 from .parser import extract_title_from_url
 
 NO_TITLE = "[no title]"
@@ -128,6 +128,13 @@ def search_media(
 
     if len(query) < 2:
         return []
+
+    # A first run has no index yet, and querying it raised
+    # "no such table: media" -- a SQLite message printed as though
+    # the user had done something wrong, for a database that simply
+    # has not been built yet. Creating the schema first means an
+    # empty index reads as no matches, which is what it is.
+    initialize_database()
 
     query_normalized = normalize_text(query)
 

@@ -258,7 +258,37 @@ class TestPermalinks:
         """
 
         assert normalize_permalink(
-            "https://new1.hdhub4u.af/dune-part-two/?x=1"
+            "https://new1.hdhub4u.af/dune-part-two/"
+        ) == "https://new1.hdhub4u.free/dune-part-two/"
+
+    def test_keeps_the_query_string(self) -> None:
+        """
+        A permalink's query is part of the address. Dropping it
+        silently asked the site for a different post, and the
+        caller had no way to tell the result was not what it
+        searched for.
+        """
+
+        assert normalize_permalink(
+            "https://new1.hdhub4u.af/dune-part-two/?p=2&lang=en"
+        ) == (
+            "https://new1.hdhub4u.free/dune-part-two/?p=2&lang=en"
+        )
+
+    def test_keeps_a_relative_permalink_query(self) -> None:
+        assert normalize_permalink(
+            "dune-part-two?p=3"
+        ) == "https://new1.hdhub4u.free/dune-part-two?p=3"
+
+    def test_a_bare_question_mark_adds_nothing(self) -> None:
+        """
+        ``?`` with nothing after it is not a query, and appending it
+        would make an address that differs from the clean one for no
+        reason.
+        """
+
+        assert normalize_permalink(
+            "https://new1.hdhub4u.af/dune-part-two/?"
         ) == "https://new1.hdhub4u.free/dune-part-two/"
 
     def test_keeps_a_relative_permalink(self) -> None:
@@ -432,6 +462,28 @@ class TestCatalogItem:
         item = CatalogItem(title="Dune", url="u")
 
         assert item.short_title(20) == "Dune"
+
+    def test_a_width_of_zero_gives_nothing(self) -> None:
+        """
+        There is no room for an ellipsis at width zero, so the
+        answer is the empty string. Slicing by ``width - 1`` used to
+        ask for negative one character and hand back the whole
+        title.
+        """
+
+        item = CatalogItem(title="Dune", url="u")
+
+        assert item.short_title(0) == ""
+
+    def test_a_negative_width_gives_nothing(self) -> None:
+        """
+        A negative width indexed from the end of the string, which
+        is not a truncation at all.
+        """
+
+        item = CatalogItem(title="Dune: Part Two", url="u")
+
+        assert item.short_title(-5) == ""
 
 
 class TestResultCount:

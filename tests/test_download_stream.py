@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hdhub4u import downloader
 from hdhub4u.downloader import DownloadJob, download_file
 from hdhub4u.errors import DownloadError
 
@@ -397,3 +398,85 @@ def test_creates_missing_directory(
     path = download_file(_job(target))
 
     assert path.exists()
+
+
+def test_a_second_download_of_one_file_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Two transfers of the same release at once used to read the same
+    offset, each send a Range from it, and each append its own body
+    to the same .part file. The result was two films interleaved and
+    one chunk too long, and the size check reported it as a corrupt
+    transfer rather than as the collision it was.
+
+    The lock is taken on a sidecar file rather than by creating the
+    .part exclusively, because a .part that already exists is the
+    resume case and must stay openable.
+    """
+
+    _install(monkeypatch, _Stream)
+
+    job = _job(tmp_path)
+
+    held = downloader._claim_partial(job.partial_path)
+
+    try:
+        with pytest.raises(DownloadError) as info:
+            download_file(job)
+
+    finally:
+        held.close()
+
+    assert "already running" in str(info.value)
+    assert "file.mp4" in str(info.value)
+
+
+def test_the_claim_is_released_after_a_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A finished transfer must not leave the file locked, or the next
+    attempt at the same download would be refused by its own
+    predecessor.
+    """
+
+    _install(monkeypatch, _Stream)
+
+    job = _job(tmp_path)
+
+    download_file(job)
+
+    job.partial_path.unlink(missing_ok=True)
+    job.output_path.unlink(missing_ok=True)
+
+    downloader._claim_partial(job.partial_path).close()
+
+
+def test_the_claim_is_released_after_a_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A transfer that raises must give the claim back, so a retry is
+    not blocked by the attempt that just failed.
+    """
+
+    class Failing(_Stream):
+        @staticmethod
+        def response_factory(
+            method: str,
+            url: str,
+        ) -> httpx.Response:
+            raise httpx.ConnectError("no route to host")
+
+    _install(monkeypatch, Failing)
+
+    job = _job(tmp_path)
+
+    with pytest.raises(DownloadError):
+        download_file(job)
+
+    downloader._claim_partial(job.partial_path).close()

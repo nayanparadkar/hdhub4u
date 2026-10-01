@@ -116,7 +116,18 @@ class CatalogItem:
     imdb_id: str = ""
 
     def short_title(self, width: int = 70) -> str:
-        """Return the title trimmed to a terminal-friendly width."""
+        """
+        Return the title trimmed to a terminal-friendly width.
+
+        A width of zero or less has no room for an ellipsis, so the
+        title is simply cut. The old arithmetic asked for
+        ``width - 1`` characters and appended a character, which
+        silently produced the whole title when there was no space
+        for it, and indexed from the end on a negative width.
+        """
+
+        if width <= 0:
+            return ""
 
         if len(self.title) <= width:
             return self.title
@@ -168,14 +179,26 @@ def normalize_permalink(permalink: str) -> str:
     rotates. The site itself ignores that host and uses only the
     path, so the path is what is reproduced here. Without this a
     result would be advertised at an address the CLI cannot read.
+
+    The query string is kept. Dropping it loses the post's
+    ``?p=`` or tracking parameters, and a permalink that arrives
+    with a fragment or a bare ``?`` still has to produce an
+    address the site will answer to.
     """
 
-    path = urlparse(permalink).path or "/"
+    parsed = urlparse(permalink)
+
+    path = parsed.path or "/"
 
     if not path.startswith("/"):
         path = f"/{path}"
 
-    return f"{SITE_ORIGIN}{path}"
+    address = f"{SITE_ORIGIN}{path}"
+
+    if parsed.query:
+        address = f"{address}?{parsed.query}"
+
+    return address
 
 
 def _today_tag() -> str:

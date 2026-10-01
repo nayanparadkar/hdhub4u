@@ -5,12 +5,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+from hdhub4u import ui
 from hdhub4u.ui import (
     copy_to_clipboard,
     format_type,
     print_error,
     print_results,
     shorten_title,
+    show_status,
     terminal_width,
 )
 
@@ -133,3 +135,71 @@ def test_copy_to_clipboard_skips_failures(
     )
 
     assert copy_to_clipboard("text") is False
+
+
+def test_print_error_does_not_read_site_text_as_markup(
+    capsys,
+) -> None:
+    """
+    Error messages carry server names, page titles and exception text
+    naming URLs. Interpolated into a Rich markup string, a title of
+    "[red]" was applied as a style and "[/]" was swallowed, so the
+    panel showed the program's words and dropped the site's.
+    """
+
+    print_error("Dune [/] [red]not found[/red]")
+
+    printed = capsys.readouterr().out
+
+    assert "Dune" in printed
+    assert "[red]" in printed
+    assert "[/]" in printed
+
+
+def test_clear_screen_does_not_shell_out(
+    monkeypatch,
+    capsys,
+) -> None:
+    """
+    It used to run ``os.system("clear")``, which put a command
+    through the shell, forked a process, and on a system without the
+    program printed "sh: 1: clear: not found" into the middle of the
+    output.
+    """
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("shelled out")
+
+    monkeypatch.setattr(ui.os, "system", forbidden)
+
+    ui.clear_screen()
+
+    capsys.readouterr()
+
+
+def test_show_status_reports_the_data_locations(
+    monkeypatch,
+    capsys,
+    tmp_path,
+) -> None:
+    """
+    Moved here from the removed offline CLI, which was the only thing
+    importing it. It is the one command that tells a user where their
+    files are, so it has to survive the deletion of the module it came
+    from.
+    """
+
+    monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+    from hdhub4u.database import initialize_database
+
+    initialize_database()
+
+    show_status()
+
+    printed = capsys.readouterr().out
+
+    assert "media.db" in printed
+    assert "Downloads" in printed
+    assert "Browser" in printed
+    assert "Page rendering" in printed
