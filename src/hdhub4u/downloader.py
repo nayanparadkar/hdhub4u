@@ -167,6 +167,7 @@ def create_download_job(
     *,
     root: Path = DOWNLOADS_DIR,
     extension: str = "",
+    filename: str = "",
 ) -> DownloadJob:
     """
     Create a prepared download job.
@@ -174,9 +175,26 @@ def create_download_job(
     ``extension`` is the media extension the resolved link
     advertised. It is threaded through to the filename so the saved
     file is playable.
+
+    ``filename`` overrides the composed name entirely. When a gate
+    has been opened the server states the real name of the file, and
+    that name already carries the release group and encoding. A name
+    composed here would only be a lossy copy of it.
     """
 
     option_title = option["title"]
+
+    if filename.strip():
+        output_filename = with_extension(
+            sanitize_filename(filename),
+            extension,
+        )
+    else:
+        output_filename = create_output_filename(
+            title,
+            option_title,
+            extension,
+        )
 
     return DownloadJob(
         title=title,
@@ -187,11 +205,7 @@ def create_download_job(
             title,
             root=root,
         ),
-        output_filename=create_output_filename(
-            title,
-            option_title,
-            extension,
-        ),
+        output_filename=output_filename,
     )
 
 
