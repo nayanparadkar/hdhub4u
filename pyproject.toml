@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hdhub4u"
+version = "0.2.0"
+description = "Search and download media from a local index"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4==4.15.0",
+    "httpx==0.28.1",
+    "rich==15.0.0",
+]
+
+[project.optional-dependencies]
+browser = [
+    "playwright>=1.40",
+]
+dev = [
+    "flake8==7.4.1",
+    "isort==9.0.2",
+    "pytest==9.1.1",
+    "pytest-cov==7.0.0",
+]
+
+[project.scripts]
+hdhub4u = "hdhub4u.__main__:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "live: tests that reach a real host over the network",
+    "browser: tests that launch a real browser",
+]
+# The tests marked 'live' reach the real site, so they are excluded
+# by default and the suite stays offline and deterministic. Run them
+# with:  pytest -m live
+addopts = "-q --strict-markers -m 'not live'"
+
+[tool.isort]
+profile = "black"
+line_length = 79
+
+[tool.coverage.run]
+source = ["hdhub4u"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

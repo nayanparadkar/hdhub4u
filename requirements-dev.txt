@@ -1,0 +1,6 @@
+-r requirements.txt
+flake8==7.4.1
+isort==9.0.2
+mypy_extensions==1.1.0
+pycodestyle==2.15.0
+pyflakes==4.0.1

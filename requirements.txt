@@ -1,0 +1,13 @@
+anyio==4.15.1
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
+rich==15.0.0
+soupsieve==2.10
+typing_extensions==4.16.0

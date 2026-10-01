@@ -1,0 +1,611 @@
+"""Live tests against the real host.
+
+These reach https://new1.hdhub4u.free/ over the network, so they
+are marked ``live`` and excluded from the default run. Execute
+them with::
+
+    pytest -m live
+
+They are read-only: nothing here downloads media, and the probes
+only ever resolve a link far enough to read its content type.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import httpx
+import pytest
+
+from hdhub4u.database import (
+    add_media_batch,
+    get_media_count,
+    initialize_database,
+    newest_media,
+)
+from hdhub4u.inspector import inspect_url
+from hdhub4u.parser import (
+    downloadable_options,
+    extract_content_links,
+    extract_download_options,
+    is_category_url,
+)
+from hdhub4u.probe import (
+    OptionProbe,
+    group_by_downloadability,
+    summarize_gating,
+)
+from hdhub4u.quality import (
+    QualityOption,
+    extract_resolution,
+    find_quality_options,
+    select_smallest,
+)
+from hdhub4u.resolver import DirectResolver
+from hdhub4u.search import (
+    calculate_score,
+    normalize_text,
+    search_media,
+)
+
+pytestmark = pytest.mark.live
+
+HOST = "https://new1.hdhub4u.free/"
+
+#: A page known to carry download options.
+MOVIE_URL = (
+    f"{HOST}"
+    "batman-robin-1997-hindi-bluray-full-movie/"
+)
+
+
+@pytest.fixture(scope="module")
+def homepage() -> dict[str, object]:
+    """Fetch the homepage once for the whole module."""
+
+    result = inspect_url(HOST)
+
+    assert not result["error"], result["error"]
+
+    return result
+
+
+@pytest.fixture(scope="module")
+def movie_page() -> dict[str, object]:
+    """Fetch one media page once for the whole module."""
+
+    result = inspect_url(MOVIE_URL)
+
+    assert not result["error"], result["error"]
+
+    return result
+
+
+def flaky(fn, attempts: int = 3):
+    """
+    Retry a network call, for transient failures.
+
+    A handshake timeout against a third-party host is not a defect
+    in this code, so a live test should try again rather than report
+    a failure the project did not cause.
+    """
+
+    last: Exception | None = None
+
+    for attempt in range(attempts):
+        try:
+            return fn()
+
+        except (httpx.TransportError, OSError) as error:
+            last = error
+
+            if attempt + 1 < attempts:
+                time.sleep(1.5 * (attempt + 1))
+
+    raise AssertionError(
+        f"gave up after {attempts} attempts: {last}"
+    )
+
+
+@pytest.fixture(scope="module")
+def live_options(movie_page: dict[str, object]):
+    """Download options for the module's media page."""
+
+    return downloadable_options(
+        extract_download_options(
+            str(movie_page["html"]),
+            str(movie_page["final_url"]),
+        )
+    )
+
+
+@pytest.fixture(scope="module")
+def live_probes(live_options):
+    """Probe results for the module's download options."""
+
+    return OptionProbe(
+        DirectResolver(timeout=15.0)
+    ).probe_all(live_options)
+
+
+class TestLiveHostReachable:
+    def test_homepage_answers_with_html(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        assert homepage["status"] == 200
+        assert str(
+            homepage["content_type"]
+        ).startswith("text/html")
+        assert homepage["html"]
+
+    def test_homepage_type_is_webpage(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        assert homepage["type"] == "webpage"
+
+    def test_homepage_has_a_title(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        assert str(homepage["title"]).strip()
+
+
+class TestLiveIndexParsing:
+    def test_extracts_content_links(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        links = extract_content_links(
+            str(homepage["html"]),
+            str(homepage["final_url"]),
+        )
+
+        assert links
+
+    def test_every_link_is_same_host(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        links = extract_content_links(
+            str(homepage["html"]),
+            str(homepage["final_url"]),
+        )
+
+        for link in links:
+            assert str(
+                link["url"]
+            ).startswith(HOST.rstrip("/"))
+
+    def test_links_carry_a_usable_type(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        links = extract_content_links(
+            str(homepage["html"]),
+            str(homepage["final_url"]),
+        )
+
+        for link in links:
+            assert link["type"] in {
+                "movie",
+                "webseries",
+                "episode",
+            }
+            assert str(link["title"]).strip()
+
+    def test_category_links_are_recognised(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        assert is_category_url(
+            f"{HOST}category/hollywood-movies/"
+        )
+
+    def test_urls_are_deduplicated(
+        self,
+        homepage: dict[str, object],
+    ) -> None:
+        links = extract_content_links(
+            str(homepage["html"]),
+            str(homepage["final_url"]),
+        )
+
+        urls = [
+            link["url"]
+            for link in links
+        ]
+
+        assert len(urls) == len(set(urls))
+
+
+class TestLiveDownloadOptions:
+    def test_options_are_found(
+        self,
+        movie_page: dict[str, object],
+    ) -> None:
+        options = extract_download_options(
+            str(movie_page["html"]),
+            str(movie_page["final_url"]),
+        )
+
+        assert options
+
+    def test_options_are_off_site(
+        self,
+        movie_page: dict[str, object],
+    ) -> None:
+        options = extract_download_options(
+            str(movie_page["html"]),
+            str(movie_page["final_url"]),
+        )
+
+        for option in options:
+            assert not str(
+                option["url"]
+            ).startswith(HOST.rstrip("/"))
+
+    def test_streaming_is_excluded(
+        self,
+        movie_page: dict[str, object],
+    ) -> None:
+        options = extract_download_options(
+            str(movie_page["html"]),
+            str(movie_page["final_url"]),
+        )
+
+        downloadable = downloadable_options(
+            options
+        )
+
+        assert len(downloadable) <= len(options)
+
+        for option in downloadable:
+            assert option["type"] != "Streaming"
+
+    def test_download_options_declare_a_type(
+        self,
+        movie_page: dict[str, object],
+    ) -> None:
+        options = extract_download_options(
+            str(movie_page["html"]),
+            str(movie_page["final_url"]),
+        )
+
+        for option in options:
+            assert option["type"] in {
+                "Download",
+                "Streaming",
+            }
+
+
+class TestLiveQualityMatching:
+    def test_resolutions_are_recognised(
+        self,
+        live_options: list[dict[str, str]],
+    ) -> None:
+        found = [
+            extract_resolution(option["title"])
+            for option in live_options
+        ]
+
+        assert any(
+            value is not None
+            for value in found
+        )
+
+    def test_known_quality_matches_something(
+        self,
+        live_options: list[dict[str, str]],
+    ) -> None:
+        for value in (
+            "1080p",
+            "720p",
+            "480p",
+        ):
+            quality = QualityOption(
+                key=value,
+                label=value,
+                value=value,
+            )
+
+            matches = find_quality_options(
+                live_options,
+                quality,
+            )
+
+            for match in matches:
+                assert (
+                    extract_resolution(match["title"])
+                    == int(value.removesuffix("p"))
+                )
+
+    def test_smallest_option_is_chosen(
+        self,
+        live_options: list[dict[str, str]],
+    ) -> None:
+        smallest = select_smallest(live_options)
+
+        assert smallest is not None
+
+        chosen = extract_resolution(
+            smallest["title"]
+        )
+
+        for option in live_options:
+            other = extract_resolution(
+                option["title"]
+            )
+
+            if other is not None and chosen is not None:
+                assert chosen <= other
+
+    def test_best_quality_returns_everything(
+        self,
+        live_options: list[dict[str, str]],
+    ) -> None:
+        best = QualityOption(
+            key="1",
+            label="Best available",
+            value="best",
+        )
+
+        assert (
+            len(
+                find_quality_options(
+                    live_options,
+                    best,
+                )
+            )
+            == len(live_options)
+        )
+
+
+class TestLiveLinkGating:
+    def test_probe_never_raises(
+        self,
+        live_probes,
+    ) -> None:
+        assert live_probes
+
+        for result in live_probes:
+            assert result.reason or (
+                result.is_media
+            )
+
+    def test_non_media_links_are_labelled(
+        self,
+        live_probes,
+    ) -> None:
+        for result in live_probes:
+            if not result.is_media:
+                assert result.reason
+
+    def test_gated_hosts_are_reported_honestly(
+        self,
+        live_probes,
+    ) -> None:
+        # The hosts behind these options answer with a web page, so
+        # the probe must say so rather than claim a media link.
+        summary = summarize_gating(live_probes)
+
+        if not any(
+            result.is_media
+            for result in live_probes
+        ):
+            assert "0 of" in summary
+
+    def test_summary_always_reads_sensibly(
+        self,
+        live_probes,
+    ) -> None:
+        usable, blocked = group_by_downloadability(
+            live_probes
+        )
+
+        assert (
+            len(usable) + len(blocked)
+            == len(live_probes)
+        )
+
+
+class TestLiveSearch:
+    def test_scores_a_known_title(self) -> None:
+        score = calculate_score(
+            "batman robin",
+            "Batman Robin Full Movie",
+        )
+
+        assert score > 0
+
+    def test_unrelated_query_scores_zero(
+        self,
+    ) -> None:
+        assert (
+            calculate_score(
+                "zzzzqqqxyzzy",
+                "Batman Robin Full Movie",
+            )
+            == 0
+        )
+
+    def test_normalization_drops_punctuation(
+        self,
+    ) -> None:
+        assert normalize_text(
+            "Batman & Robin!"
+        ) == "batman robin"
+
+    def test_search_scores_real_titles(
+        self,
+        isolated_home: Path,
+        homepage: dict[str, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Seed from the live homepage so the ranking is exercised
+        # against real titles rather than a fixed fixture.
+        links = extract_content_links(
+            str(homepage["html"]),
+            str(homepage["final_url"]),
+        )
+
+        assert links
+
+        monkeypatch.setenv(
+            "HDHUB_HOME",
+            str(isolated_home),
+        )
+
+        initialize_database()
+
+        add_media_batch([
+            (
+                link["title"],
+                link["url"],
+                link["type"],
+                "",
+            )
+            for link in links
+        ])
+
+        assert get_media_count() == len(links)
+
+        for link in links[:5]:
+            words = normalize_text(
+                str(link["title"])
+            ).split()
+
+            if not words:
+                continue
+
+            found = search_media(words[0], limit=5)
+
+            assert found
+
+    def test_newest_rows_are_ordered(
+        self,
+        isolated_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "HDHUB_HOME",
+            str(isolated_home),
+        )
+
+        initialize_database()
+
+        add_media_batch([
+            (
+                f"Film {index}",
+                f"https://site.test/film-{index}/",
+                "movie",
+                "",
+            )
+            for index in range(5)
+        ])
+
+        rows = newest_media(3)
+
+        ids = [int(row["id"]) for row in rows]
+
+        assert ids == sorted(ids, reverse=True)
+
+
+class TestLiveLinkGating:
+    def test_probe_never_raises(
+        self,
+        live_probes,
+    ) -> None:
+        assert live_probes
+
+        for result in live_probes:
+            assert result.reason or (
+                result.is_media
+            )
+
+    def test_non_media_links_are_labelled(
+        self,
+        live_probes,
+    ) -> None:
+        for result in live_probes:
+            if not result.is_media:
+                assert result.reason
+
+    def test_gated_hosts_are_reported_honestly(
+        self,
+        live_probes,
+    ) -> None:
+        # The hosts behind these options answer with a web page, so
+        # the probe must say so rather than claim a media link.
+        summary = summarize_gating(live_probes)
+
+        if not any(
+            result.is_media
+            for result in live_probes
+        ):
+            assert "0 of" in summary
+
+    def test_summary_always_reads_sensibly(
+        self,
+        live_probes,
+    ) -> None:
+        usable, blocked = group_by_downloadability(
+            live_probes
+        )
+
+        assert (
+            len(usable) + len(blocked)
+            == len(live_probes)
+        )
+
+
+class TestLiveMediaHost:
+    """A host that does serve files directly."""
+
+    MP4 = (
+        "https://download.samplelib.com/mp4/"
+        "sample-5s.mp4"
+    )
+
+    def test_direct_resolver_finds_media(
+        self,
+    ) -> None:
+        result = flaky(
+            lambda: DirectResolver(
+                timeout=20.0
+            ).resolve(self.MP4)
+        )
+
+        assert result.is_media
+
+    def test_html_page_is_not_media(self) -> None:
+        result = flaky(
+            lambda: DirectResolver(
+                timeout=20.0
+            ).resolve(HOST)
+        )
+
+        assert not result.is_media
+
+    def test_direct_media_reports_an_extension(
+        self,
+    ) -> None:
+        from hdhub4u.http_types import (
+            resolve_extension,
+        )
+
+        result = flaky(
+            lambda: DirectResolver(
+                timeout=20.0
+            ).resolve(self.MP4)
+        )
+
+        assert (
+            resolve_extension(
+                result.final_url,
+                result.content_type,
+            )
+            == ".mp4"
+        )
