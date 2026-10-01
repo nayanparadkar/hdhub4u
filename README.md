@@ -22,7 +22,7 @@ site.
 ## Install
 
 ```bash
-cd media-downloader
+cd hdhub4u
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
