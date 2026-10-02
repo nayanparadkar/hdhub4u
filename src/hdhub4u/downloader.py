@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import fcntl
 import re
+import shutil
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Callable
@@ -98,6 +100,56 @@ def sanitize_filename(
     return name
 
 
+#: Longest a download directory name gets. Site titles run to a
+#: hundred and fifty characters of resolution and codec noise, and a
+#: directory called
+#: "Dune: Part Two (2024) WEB-DL [Hindi (ORG 5.1) + English] 4K 1080p..."
+#: is a name every file manager has to truncate for the user, losing
+#: the part that identifies it. Sixty keeps the beginning, which is
+#: where the title is.
+MAX_DIRECTORY_NAME = 60
+
+
+def shorten_directory_name(
+    name: str,
+    limit: int = MAX_DIRECTORY_NAME,
+) -> str:
+    """
+    Shorten a title to something usable as a directory name.
+
+    Cut at a word boundary, so the name that survives is one a person
+    would have written, and never leaves a trailing space or a lone
+    bracket. The limit is a soft one: a single unbroken word longer
+    than the limit is kept whole rather than cut through the middle,
+    because a truncated word identifies nothing and a long one at
+    least still does.
+
+    Args:
+        name: The title, already sanitized for a filesystem.
+        limit: Longest name to aim for.
+
+    Returns:
+        A name of at most ``limit`` characters, or ``name`` itself
+        when it is already short enough.
+    """
+
+    name = name.strip()
+
+    if len(name) <= limit:
+        return name
+
+    window = name[:limit + 1]
+
+    # rsplit on the space, so what is kept is the whole leading run of
+    # words rather than a cut through one of them.
+    head, separator, _ = window.rpartition(" ")
+
+    if head and len(head) >= limit // 2:
+        return head.rstrip()
+
+    return window[:limit].rstrip()
+
+
 def create_output_directory(
     title: str,
     *,
@@ -105,7 +157,9 @@ def create_output_directory(
 ) -> Path:
     """Create and return the media output directory."""
 
-    directory = root / sanitize_filename(title)
+    directory = root / shorten_directory_name(
+        sanitize_filename(title)
+    )
 
     directory.mkdir(
         parents=True,
@@ -603,6 +657,34 @@ def format_bytes(
     return f"{value} B"
 
 
+def format_duration(
+    seconds: float,
+) -> str:
+    """
+    Format a span of time the way a person would say it.
+
+    Rough on purpose: "about 3m" is useful while watching a download
+    and "3m 4s" is not, because the estimate it came from is itself
+    only good to a factor of two.
+    """
+
+    if seconds < 1:
+        return "<1s"
+
+    if seconds < 60:
+        return f"{int(seconds)}s"
+
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+
+    hours = seconds / 3600
+
+    if hours < 24:
+        return f"{hours:.1f}h"
+
+    return f"{int(hours // 24)}d"
+
+
 def format_progress(
     downloaded: int,
     total: int | None,
@@ -624,34 +706,303 @@ def format_progress(
     )
 
 
+#: Longest and shortest a progress bar may be, whatever the terminal.
+#: The shortest is where the numbers start being the bar; the longest
+#: is where a bar becomes a progress picture nobody reads the numbers
+#: under any more.
+BAR_MAX_WIDTH = 40
+BAR_MIN_WIDTH = 10
+
+
 def render_progress_bar(
     downloaded: int,
     total: int | None,
-    width: int = 40,
+    *,
+    speed: float | None = None,
+    eta: float | None = None,
+    width: int | None = None,
 ) -> str:
-    """Render a terminal progress bar."""
+    """
+    Render a terminal progress bar.
+
+    With a total, the bar itself, a percentage, both sizes, a speed
+    and an estimate. The bar takes whatever the terminal has left once
+    the fixed parts are laid out, so the line never wraps: a progress
+    line that wraps onto two rows is unreadable and leaves debris on
+    the terminal as it goes.
+
+    Without a total there is nothing to be a percentage of, so the bar
+    runs indeterminate and shows the bytes received. Speed and an
+    estimate are left off in that case too -- a speed with no total is
+    still a fact worth having, but there is nothing to estimate, and
+    printing one without the other invites reading a number that is
+    not what it looks like.
+
+    Args:
+        downloaded: Bytes received so far.
+        total: Expected total bytes, or None when the server said none.
+        speed: Bytes per second, or None when not known yet.
+        eta: Seconds remaining, or None when not knowable.
+        width: Columns for the terminal. Measured when not given.
+
+    Returns:
+        A markup string, ready to print.
+    """
+
+    available = (
+        terminal_columns()
+        if width is None
+        else width
+    )
 
     if total is None or total <= 0:
+        bar_width = _fit_width(
+            available - len(format_bytes(downloaded)) - 4,
+        )
+
         return (
             "["
-            + "=" * (width - 1)
+            + "=" * (bar_width - 1)
             + "> ] "
             + format_bytes(downloaded)
         )
 
     ratio = min(downloaded / total, 1.0)
 
-    filled = int(ratio * width)
+    sizes = (
+        f"{format_bytes(downloaded)} / "
+        f"{format_bytes(total)}"
+    )
+    percent = f"{ratio * 100:6.2f}%"
+    pace = _format_pace(speed, eta)
+
+    # The two bracket characters and a space either side of the
+    # percentage, whose own right-alignment already eats one of them.
+    essential = 4 + len(percent) + len(sizes)
+
+    # The speed and the estimate give way before the bar does. Both are
+    # facts about the transfer and neither is the transfer itself, and a
+    # line too wide for the terminal wraps onto a second row and leaves
+    # debris behind it as it goes.
+    if pace and available - essential - 2 - len(pace) < (
+        BAR_MIN_WIDTH
+    ):
+        pace = ""
+
+    bar_width = _fit_width(
+        available - essential,
+        extra=(2 + len(pace)) if pace else 0,
+    )
+
+    filled = int(ratio * bar_width)
 
     return (
         "["
         + "=" * filled
-        + " " * (width - filled)
+        + " " * (bar_width - filled)
         + "] "
-        + f"{ratio * 100:6.2f}% "
-        + f"{format_bytes(downloaded)} / "
-        + f"{format_bytes(total)}"
+        + percent
+        + " "
+        + sizes
+        + (f"  {pace}" if pace else "")
     )
+
+
+def _format_pace(
+    speed: float | None,
+    eta: float | None,
+) -> str:
+    """Return the "3.1 MB/s  2m left" half of the progress line."""
+
+    parts: list[str] = []
+
+    if speed and speed > 0:
+        parts.append(f"{format_bytes(int(speed))}/s")
+
+    if eta is not None and eta >= 0:
+        parts.append(f"{format_duration(eta)} left")
+
+    return "  ".join(parts)
+
+
+def _fit_width(
+    available: int,
+    *,
+    extra: int = 0,
+) -> int:
+    """
+    Return how many columns are left for the bar.
+
+    Floored at :data:`BAR_MIN_WIDTH` and capped at
+    :data:`BAR_MAX_WIDTH`. The floor is deliberate: on a very narrow
+    terminal a zero-width bar is worse than a crowded one, because
+    there is then no bar at all.
+
+    Args:
+        available: Columns available in total.
+        extra: Columns to hold back for something already decided on,
+            such as the speed.
+    """
+
+    return max(
+        BAR_MIN_WIDTH,
+        min(BAR_MAX_WIDTH, available - extra),
+    )
+
+
+def terminal_columns() -> int:
+    """Return the terminal width, falling back to something sane."""
+
+    return shutil.get_terminal_size(
+        (100, 20)
+    ).columns
+
+
+class TransferProgress:
+    """
+    Turn byte counts into a progress line that says more than bytes.
+
+    A bar alone answers "how far"; a download of two gigabytes answers
+    "how long" only if the rate is shown. Speed is measured over a
+    window rather than since the start, because the first chunk
+    arrives in a burst and averaging it in would report a rate nobody
+    ever saw and an estimate that finished before the download did.
+
+    The bar is redrawn at most :data:`MIN_INTERVAL` apart. Without
+    that, a fast link on a small file prints hundreds of lines in a
+    second, and on a slow connection over ssh the cost of writing them
+    becomes part of what is being waited for.
+
+    Args:
+        total: Expected total bytes, or None when unknown.
+        interval: Minimum seconds between redraws.
+        clock: Monotonic seconds source, injectable for tests.
+    """
+
+    #: Fast enough to look continuous, slow enough to be cheap.
+    MIN_INTERVAL = 0.1
+
+    def __init__(
+        self,
+        total: int | None,
+        *,
+        interval: float = MIN_INTERVAL,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.total = total
+        self.interval = interval
+        self.clock = clock
+        self.started = clock()
+        self._last_draw = 0.0
+        self._last_at = self.started
+        self._last_bytes = 0
+        self._speed = 0.0
+        self._drawn = False
+
+    def update(
+        self,
+        downloaded: int,
+        total: int | None = None,
+    ) -> None:
+        """
+        Record progress and redraw if enough time has passed.
+
+        Args:
+            downloaded: Bytes received so far.
+            total: Expected total bytes, overriding the constructor's
+                when given, since the size is often only known once
+                the transfer has started.
+        """
+
+        if total is not None:
+            self.total = total
+
+        now = self.clock()
+
+        elapsed = now - self._last_at
+
+        if elapsed > 0 and downloaded != self._last_bytes:
+            instant = (downloaded - self._last_bytes) / elapsed
+
+            # Smoothed, so one stalled chunk does not move the line
+            # and then move it back.
+            self._speed = (
+                instant
+                if self._speed == 0
+                else (self._speed * 0.7 + instant * 0.3)
+            )
+
+            self._last_at = now
+            self._last_bytes = downloaded
+
+        if self._drawn and now - self._last_draw < self.interval:
+            return
+
+        self._last_draw = now
+        self._drawn = True
+
+        self.draw(downloaded)
+
+    def draw(
+        self,
+        downloaded: int,
+    ) -> None:
+        """Print one progress line."""
+
+        remaining = self._remaining(downloaded)
+
+        print(
+            "\r"
+            + render_progress_bar(
+                downloaded,
+                self.total,
+                speed=self._speed or None,
+                eta=remaining,
+            ),
+            end="",
+            flush=True,
+        )
+
+    def _remaining(
+        self,
+        downloaded: int,
+    ) -> float | None:
+        """
+        Return the seconds left, when that is knowable.
+
+        Needs both a total and a rate. The first sample gives a crude
+        rate from one chunk, which is corrected within the next tenth
+        of a second by the smoothing above; with no rate at all there
+        is nothing to divide and no honest number to print, so nothing
+        is printed.
+        """
+
+        if not self.total or self._speed <= 0:
+            return None
+
+        return max(
+            0.0,
+            (self.total - downloaded) / self._speed,
+        )
+
+    def finish(
+        self,
+        downloaded: int,
+    ) -> None:
+        """
+        Draw the last line at full width.
+
+        Args:
+            downloaded: Bytes received in total.
+        """
+
+        print(
+            render_progress_bar(
+                downloaded,
+                self.total,
+            ),
+            flush=True,
+        )
 
 
 def print_download_progress(

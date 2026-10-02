@@ -1,13 +1,16 @@
 """Terminal rendering, clipboard and browser helpers."""
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import webbrowser
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from rich.console import Console
 from rich.panel import Panel
@@ -340,6 +343,136 @@ def terminal_width() -> int:
     ).columns
 
 
+class Spinner:
+    """
+    An animated "working" line, shown only on a terminal.
+
+    Resolving a download gate is a multi-hop walk across four or five
+    hosts, and it can take ten seconds with nothing on screen. A line
+    that moves says the program has not stopped; silence reads as a
+    hang, and a user who thinks it has hung will kill it.
+
+    Off a terminal the frames are dropped and the message is printed
+    once. A carriage return in a redirected file is not a spinner, it
+    is a file full of ``|/-\\`` that some other tool has to strip.
+
+    Args:
+        message: What is being waited on.
+        interval: Seconds between frames.
+    """
+
+    #: Ten frames, then repeat. Fast enough to read as motion, slow
+    #: enough not to be a flicker on a terminal multiplexer.
+    FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        interval: float = 0.1,
+    ) -> None:
+        self.message = message
+        self.interval = interval
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    @property
+    def animates(self) -> bool:
+        """Return True when frames will actually be drawn."""
+
+        return bool(console.is_terminal)
+
+    def start(self) -> None:
+        """Begin animating, or print the message once."""
+
+        if not self.animates:
+            console.print(self.message)
+            return
+
+        self._thread = threading.Thread(
+            target=self._spin,
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(
+        self,
+        message: str = "",
+    ) -> None:
+        """
+        Stop animating and clear the line.
+
+        Args:
+            message: Printed in place of the spinner when given.
+        """
+
+        self._stop.set()
+
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+        if not self.animates:
+            return
+
+        # Erase before writing, or the last frame stays on the line.
+        console.file.write("\r\033[2K")
+        console.file.flush()
+
+        if message:
+            console.print(message)
+
+    def _spin(self) -> None:
+        """Draw frames until asked to stop."""
+
+        index = 0
+
+        while not self._stop.is_set():
+            frame = self.FRAMES[index % len(self.FRAMES)]
+
+            console.file.write(
+                f"\r\033[2K{frame} {self.message}"
+            )
+            console.file.flush()
+
+            index += 1
+
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> Spinner:
+        self.start()
+
+        return self
+
+    def __exit__(self, *exception: object) -> None:
+        self.stop()
+
+
+@contextlib.contextmanager
+def waiting(
+    message: str,
+) -> Iterator[None]:
+    """
+    Show a spinner for the length of a slow operation.
+
+    Args:
+        message: What is being waited on.
+
+    Yields:
+        Nothing; the point is the line on screen while it lasts.
+    """
+
+    spinner = Spinner(message)
+
+    spinner.start()
+
+    try:
+        yield
+
+    finally:
+        spinner.stop()
+
+
 def print_header(
     title: str = "HDHUB4U DOWNLOADER",
     subtitle: str = "",
@@ -618,6 +751,107 @@ def open_url(
     return webbrowser.open(url)
 
 
+def recent_downloads(
+    limit: int = 5,
+) -> list[tuple[str, int, float]]:
+    """
+    Return the most recently changed downloads, newest first.
+
+    ``status`` is where a user goes to find out where their files are.
+    Before this, it answered that question for the index and the cache
+    and then stopped, which left the one directory they actually care
+    about -- ``downloads/`` -- reported only as a path they then had to
+    go and open by hand.
+
+    Only media is listed: a ``.part`` file is a transfer still in
+    flight, and a directory timestamp says when something was written
+    into it rather than when the title was fetched, so sorting on it
+    would put the most recent *activity* first rather than the most
+    recent download.
+
+    Args:
+        limit: How many to return at most.
+
+    Returns:
+        ``(filename, size_bytes, modified_time)`` per file, newest
+        first. Empty when nothing has been downloaded, or when the
+        directory does not exist yet.
+    """
+
+    from .project import get_downloads_dir
+
+    root = get_downloads_dir()
+
+    if not root.is_dir():
+        return []
+
+    found: list[tuple[str, int, float]] = []
+
+    try:
+        for entry in root.rglob("*"):
+            if not entry.is_file():
+                continue
+
+            if entry.suffix in {".part", ".lock"}:
+                continue
+
+            try:
+                info = entry.stat()
+
+            except OSError:
+                # A file removed between listing and stat is not a
+                # failure worth reporting.
+                continue
+
+            found.append(
+                (str(entry.relative_to(root)), info.st_size, info.st_mtime)
+            )
+
+    except OSError:
+        return []
+
+    found.sort(key=lambda item: item[2], reverse=True)
+
+    return found[:limit]
+
+
+def _describe_recent(
+    downloads: Sequence[tuple[str, int, float]],
+) -> None:
+    """Print the recent downloads, if there are any."""
+
+    if not downloads:
+        print("Recent downloads : none yet")
+        return
+
+    print(f"Recent downloads  ({len(downloads)} most recent)")
+
+    for name, size, modified in downloads:
+        stamp = datetime.fromtimestamp(modified)
+
+        print(
+            f"  {stamp:%Y-%m-%d %H:%M}  "
+            f"{_short_size(size):>9}  {name}"
+        )
+
+
+def _short_size(size: int) -> str:
+    """Format a size in the fewest characters that stay honest."""
+
+    value = float(size)
+
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(value)} B"
+
+            return f"{value:.1f} {unit}"
+
+        value /= 1024
+
+    return f"{value:.1f} TB"
+
+
 def show_status() -> None:
     """
     Report where the program keeps its data and what it can reach.
@@ -673,4 +907,7 @@ def show_status() -> None:
         f"{'on' if rendering_on else 'off'} "
         f"(set {USE_BROWSER_ENV}=1)"
     )
+
+    print()
+    _describe_recent(recent_downloads())
     print()

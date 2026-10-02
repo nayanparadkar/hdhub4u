@@ -37,13 +37,17 @@ from .catalog import (
     search_page,
 )
 from .downloader import (
+    TransferProgress,
     clear_progress_line,
     create_download_job,
     download_file,
-    print_download_progress,
 )
 from .errors import DownloadError, HdHubError, ResolutionError
-from .project import get_downloads_dir
+from .link_cache import LinkCache
+from .project import (
+    get_downloads_dir,
+    get_link_cache_path,
+)
 from .ui import (
     ResultRow,
     clear_screen,
@@ -53,6 +57,7 @@ from .ui import (
     print_header,
     print_results,
     print_table_results,
+    waiting,
 )
 
 APP_TITLE = "HDHUB4U"
@@ -629,12 +634,19 @@ def start_download(
         Text.assemble(
             (f"opening {option.host} gate for ", "dim"),
             (option.label, "dim"),
-            ("...", "dim"),
         )
     )
 
     try:
-        link = unlock.unlock(option, client=client)
+        # Opening a gate is a walk across four or five hosts and can
+        # take ten seconds, so it gets a line that moves rather than
+        # ten seconds of nothing.
+        with waiting(f"resolving {option.host}"):
+            link = unlock.unlock(
+                option,
+                client=client,
+                cache=LinkCache(get_link_cache_path()),
+            )
 
     except ResolutionError as error:
         print_error(
@@ -684,10 +696,12 @@ def start_download(
 
     console.print()
 
+    progress = TransferProgress(None)
+
     try:
         path = download_file(
             job,
-            progress_callback=print_download_progress,
+            progress_callback=progress.update,
         )
 
     except DownloadError as error:
@@ -807,12 +821,13 @@ def browse_results(
 
     while True:
         try:
-            found = search_page(
-                query,
-                limit=limit,
-                page=page,
-                client=client,
-            )
+            with waiting(f'searching for "{query}"'):
+                found = search_page(
+                    query,
+                    limit=limit,
+                    page=page,
+                    client=client,
+                )
 
         except HdHubError as error:
             print_error(f"Search failed.\n{error}")
@@ -955,7 +970,8 @@ def _handle_selection(
 
     while True:
         try:
-            options = fetch_options(item.url, client=client)
+            with waiting("reading options"):
+                options = fetch_options(item.url, client=client)
 
         except HdHubError as error:
             print_error(str(error))

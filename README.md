@@ -68,13 +68,40 @@ goes back and `q` quits. Typing a number still works everywhere, so
 there is always a way through that is not the arrow keys. On a pipe,
 where a terminal cannot be put into raw mode, typing is the only path.
 
+### While it waits
+
+Searching, reading a post's options and opening a download gate all
+show a moving line rather than nothing at all — a gate is a walk
+across four or five hosts and can take ten seconds. Redirected to a
+pipe, the message is printed once instead and no control characters
+are written into the file.
+
+A download reports its speed and how long is left, and lays the line
+out to the terminal it is on. On a narrow terminal the speed and the
+estimate are dropped before the bar is, since both are facts about
+the transfer and the bar is the transfer. Every estimate is measured
+over the window between the last two updates, not averaged since the
+start, so the burst of the first chunk does not promise an early
+finish.
+
+Resolved download links are cached in `data/links.json` and reused for
+an hour. A cached link is probed before it is trusted, because these
+links are short-lived and a dead one would otherwise fail as a 403 at
+the download step instead of being resolved again. `hdhub4u links prune`
+drops what has expired.
+
 ### Scriptable
 
 ```bash
 hdhub4u search "big boss"           # list matches, no prompts
 hdhub4u search "big boss" --json    # same, as JSON
-hdhub4u status                      # where data lives, what is reachable
+hdhub4u status                      # where data lives, what is reachable, what was downloaded
 ```
+
+`status` ends with the most recent downloads, newest first, so the
+question it exists to answer — where did that file go — is answered by
+the command rather than by opening a directory. Partial transfers are
+left out: a `.part` file is a download still in flight.
 
 Output follows the destination. On a terminal, results are a table.
 Redirected, they are plain records: an indexed title, then the address

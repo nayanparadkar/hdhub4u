@@ -6,6 +6,7 @@ import io
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -650,6 +651,272 @@ class TestTableResults:
 
         assert "\u250f" not in printed
         assert "Nothing matched" in printed
+
+
+class TestSpinner:
+    """
+    The spinner exists because opening a download gate is a multi-hop
+    walk that can take ten seconds. What it must never do is write a
+    carriage return into a file that somebody is going to parse.
+    """
+
+    def _console(
+        self,
+        monkeypatch,
+        *,
+        terminal: bool,
+    ) -> io.StringIO:
+        buffer = io.StringIO()
+
+        monkeypatch.setattr(
+            ui,
+            "console",
+            Console(
+                file=buffer,
+                force_terminal=terminal,
+                width=80,
+            ),
+        )
+
+        return buffer
+
+    def test_a_pipe_gets_the_message_once(
+        self,
+        monkeypatch,
+    ) -> None:
+        buffer = self._console(monkeypatch, terminal=False)
+
+        spinner = ui.Spinner("resolving hubdrive")
+        spinner.start()
+        spinner.stop()
+
+        printed = buffer.getvalue()
+
+        assert printed == "resolving hubdrive\n"
+        assert "\r" not in printed
+
+    def test_a_terminal_gets_moving_frames(
+        self,
+        monkeypatch,
+    ) -> None:
+        import time
+
+        buffer = self._console(monkeypatch, terminal=True)
+
+        spinner = ui.Spinner("resolving hubdrive", interval=0.01)
+        spinner.start()
+        time.sleep(0.08)
+        spinner.stop()
+
+        printed = buffer.getvalue()
+
+        assert any(
+            frame in printed for frame in ui.Spinner.FRAMES
+        )
+        assert "resolving hubdrive" in printed
+
+    def test_it_erases_its_line_when_it_stops(
+        self,
+        monkeypatch,
+    ) -> None:
+        """
+        Without the erase the last frame stays on the line, so
+        whatever is printed next starts halfway along it.
+        """
+
+        import time
+
+        buffer = self._console(monkeypatch, terminal=True)
+
+        spinner = ui.Spinner("resolving", interval=0.01)
+        spinner.start()
+        time.sleep(0.05)
+        spinner.stop()
+
+        assert "\033[2K" in buffer.getvalue()
+
+    def test_it_reports_a_final_message(
+        self,
+        monkeypatch,
+    ) -> None:
+        buffer = self._console(monkeypatch, terminal=True)
+
+        spinner = ui.Spinner("resolving")
+        spinner.start()
+        spinner.stop("resolved")
+
+        assert "resolved" in buffer.getvalue()
+
+    def test_waiting_cleans_up_after_a_failure(
+        self,
+        monkeypatch,
+    ) -> None:
+        """
+        An error inside the block is the normal way a network call
+        ends. Leaving a spinner running over an error message would
+        have them overwrite each other.
+        """
+
+        import pytest as _pytest
+
+        buffer = self._console(monkeypatch, terminal=True)
+
+        with _pytest.raises(ValueError):
+            with ui.waiting("resolving"):
+                raise ValueError("boom")
+
+        assert "\033[2K" in buffer.getvalue()
+
+    def test_it_does_not_animate_off_a_terminal(
+        self,
+        monkeypatch,
+    ) -> None:
+        self._console(monkeypatch, terminal=False)
+
+        assert ui.Spinner("x").animates is False
+
+
+class TestRecentDownloads:
+    def _fake_downloads(self, home: Path) -> None:
+        titles = home / "downloads"
+
+        for name, size in (
+            ("Dune: Part Two (2024)", 2_100_000_000),
+            ("Big Boss S01", 700_000_000),
+            ("Avengers Endgame", 1_400_000_000),
+        ):
+            folder = titles / name
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "movie.mkv").write_bytes(b"x" * 10)
+
+    def test_it_finds_downloaded_files(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        self._fake_downloads(tmp_path)
+
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        found = ui.recent_downloads()
+
+        names = [name for name, _, _ in found]
+
+        assert len(names) == 3
+        assert any("Dune" in name for name in names)
+
+    def test_it_is_newest_first(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        """
+        Sorted by mtime, so "recent" means what somebody who just
+        downloaded something means by it.
+        """
+
+        self._fake_downloads(tmp_path)
+
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        found = ui.recent_downloads()
+
+        stamps = [stamp for _, _, stamp in found]
+
+        assert stamps == sorted(stamps, reverse=True)
+
+    def test_it_honours_the_limit(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        self._fake_downloads(tmp_path)
+
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        assert len(ui.recent_downloads(limit=2)) == 2
+
+    def test_a_partial_transfer_is_not_a_download(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        """
+        A .part file is a transfer still in flight. Listing it beside
+        finished files would answer "what did I download" with a file
+        that is still being written.
+        """
+
+        self._fake_downloads(tmp_path)
+
+        folder = tmp_path / "downloads" / "In Flight"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "movie.mkv.part").write_bytes(b"x")
+
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        names = [name for name, _, _ in ui.recent_downloads()]
+
+        assert not any(
+            name.endswith(".part") for name in names
+        )
+
+    def test_nothing_downloaded_is_not_a_crash(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        assert ui.recent_downloads() == []
+
+    def test_a_missing_directory_is_not_a_crash(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.setenv(
+            "HDHUB_HOME",
+            str(tmp_path / "never-created"),
+        )
+
+        assert ui.recent_downloads() == []
+
+    def test_status_says_when_there_is_nothing_yet(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+    ) -> None:
+        monkeypatch.setenv("HDHUB_HOME", str(tmp_path))
+
+        from hdhub4u.database import initialize_database
+        from hdhub4u.project import ensure_directories
+
+        ensure_directories()
+        initialize_database()
+
+        ui.show_status()
+
+        assert "none yet" in capsys.readouterr().out
+
+
+class TestShortSize:
+    @pytest.mark.parametrize(
+        ("size", "expected"),
+        [
+            (0, "0 B"),
+            (512, "512 B"),
+            (2048, "2.0 KB"),
+            (5 * 1024**3, "5.0 GB"),
+        ],
+    )
+    def test_it_stays_short_and_honest(
+        self,
+        size: int,
+        expected: str,
+    ) -> None:
+        assert ui._short_size(size) == expected
 
 
 class TestCopyToClipboard:

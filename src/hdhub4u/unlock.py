@@ -53,6 +53,7 @@ from .catalog import MediaOption, registrable_host
 from .errors import NetworkError, ResolutionError
 from .http import DEFAULT_ATTEMPTS, with_retries
 from .http_types import USER_AGENT, is_media_content_type
+from .link_cache import LinkCache
 from .logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -1586,6 +1587,7 @@ def unlock(
     option: MediaOption,
     *,
     client: httpx.Client | None = None,
+    cache: LinkCache | None = None,
 ) -> UnlockedLink:
     """
     Open a site's download gate and return the real file address.
@@ -1594,10 +1596,19 @@ def unlock(
     a gate that answers with a timeout is not the end of the road
     while another approach remains.
 
+    A cached resolution is tried first and is not taken on trust. These
+    links are short-lived by design, so an hour-old entry is often dead
+    and a dead one answers with a 403 that reads like a broken mirror
+    rather than a cache that needs forgetting. One probe decides it:
+    still good, use it; not, forget it and walk the gate.
+
     Args:
         option: The chosen option from a post page.
         client: Optional caller-owned client, reused across options
             so the connection pool and cookies are shared.
+        cache: Optional resolved-link cache to read and fill. Passing
+            None skips the cache entirely, which is what the tests do
+            so that two runs of one test cannot affect each other.
 
     Returns:
         A verified file address.
@@ -1634,6 +1645,15 @@ def unlock(
     http_client = client or _build_client()
 
     try:
+        reused = _reuse_cached(
+            http_client,
+            option,
+            cache,
+        )
+
+        if reused is not None:
+            return reused
+
         handlers = [
             (name, _resolve_strategy(name, option))
             for name in strategies
@@ -1643,7 +1663,7 @@ def unlock(
 
         for name, handler in handlers:
             try:
-                return handler(http_client, option)
+                link = handler(http_client, option)
 
             # One strategy failing says nothing about the next,
             # and letting an unexpected error escape would abandon
@@ -1658,6 +1678,16 @@ def unlock(
                 )
                 failures.append((name, error))
 
+                continue
+
+            _remember_cached(
+                cache,
+                option,
+                link,
+            )
+
+            return link
+
         raise _report_strategy_failures(
             option,
             failures,
@@ -1666,6 +1696,94 @@ def unlock(
     finally:
         if owned:
             http_client.close()
+
+
+def _reuse_cached(
+    client: httpx.Client,
+    option: MediaOption,
+    cache: LinkCache | None,
+) -> UnlockedLink | None:
+    """
+    Return the cached resolution for an option, if it is still good.
+
+    Verified with a probe rather than trusted, because the whole reason
+    the cache expires is that these links stop working, and using a
+    dead one hands the user a 403 at the download instead of the
+    message they needed.
+
+    Args:
+        client: The client to probe with.
+        option: The option being resolved.
+        cache: The cache, or None to skip it.
+
+    Returns:
+        The verified link, or None when there was nothing usable.
+    """
+
+    if cache is None:
+        return None
+
+    entry = cache.get(option.url)
+
+    if entry is None:
+        return None
+
+    link = verify_media(
+        client,
+        entry.final_url,
+        referer=option.url,
+    )
+
+    if link is None:
+        logger.debug(
+            "cached resolution for %s is stale, resolving again",
+            option.url,
+        )
+
+        return None
+
+    logger.info(
+        "reused cached %s link for %s",
+        entry.strategy,
+        option.url,
+    )
+
+    return replace(
+        link,
+        strategy=f"cached {entry.strategy}",
+    )
+
+
+def _remember_cached(
+    cache: LinkCache | None,
+    option: MediaOption,
+    link: UnlockedLink,
+) -> None:
+    """
+    Store a successful resolution, and never let the cache break a run.
+
+    A cache write is an optimisation. If the disk is full, read-only or
+    full of something unparseable, the download still has to happen,
+    so every failure here is logged and swallowed.
+    """
+
+    if cache is None:
+        return
+
+    try:
+        cache.put(
+            option.url,
+            link.url,
+            link.content_type,
+            link.strategy,
+        )
+
+    except (OSError, ValueError, TypeError) as error:
+        logger.warning(
+            "could not cache the resolution for %s: %s",
+            option.url,
+            error,
+        )
 
 
 def _report_strategy_failures(

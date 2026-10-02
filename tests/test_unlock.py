@@ -1487,6 +1487,143 @@ class TestUnlockMany:
             )
 
 
+class TestLinkCacheIsUsed:
+    """
+    The cache is an optimisation, so every one of these tests is also a
+    test that nothing about the answer depends on it being there.
+    """
+
+    def _cache(self, tmp_path):
+        from hdhub4u.link_cache import LinkCache
+
+        return LinkCache(tmp_path / "links.json")
+
+    def test_a_resolution_is_stored(
+        self,
+        tmp_path,
+    ) -> None:
+        option = _option("https://hubcdn.club/file/A")
+        cache = self._cache(tmp_path)
+
+        unlock(option, client=_client(_hubcdn_handler), cache=cache)
+
+        entry = cache.get(option.url)
+
+        assert entry is not None
+        assert entry.final_url.endswith(".mkv")
+
+    def test_a_second_run_skips_the_gate(
+        self,
+        tmp_path,
+    ) -> None:
+        """
+        The whole point of the cache: a repeat run does not walk the
+        gate again. The handler refuses every request except the probe
+        the cache hit still has to make.
+        """
+
+        option = _option("https://hubcdn.club/file/A")
+        cache = self._cache(tmp_path)
+
+        unlock(option, client=_client(_hubcdn_handler), cache=cache)
+
+        def only_probe(request: httpx.Request) -> httpx.Response:
+            if "Range" not in request.headers:
+                raise AssertionError(
+                    "the gate was walked again despite the cache"
+                )
+
+            return _media_response(request, "Dune.mkv", 900)
+
+        link = unlock(
+            option,
+            client=_client(only_probe),
+            cache=cache,
+        )
+
+        assert "cached" in link.strategy
+
+    def test_a_dead_cache_entry_is_not_trusted(
+        self,
+        tmp_path,
+    ) -> None:
+        """
+        These links are short-lived, so an hour-old entry is often
+        dead. Using it hands the user a 403 at the download instead of
+        the message they needed, so it is probed and, failing that,
+        forgotten and resolved for real.
+        """
+
+        option = _option("https://hubcdn.club/file/A")
+        cache = self._cache(tmp_path)
+
+        cache.put(
+            option.url,
+            "https://r2.dev/gone.mkv",
+            "video/x-matroska",
+            "hubcdn",
+        )
+
+        def gone_is_gone(request: httpx.Request) -> httpx.Response:
+            if "gone.mkv" in str(request.url):
+                return httpx.Response(
+                    403,
+                    request=request,
+                )
+
+            return _hubcdn_handler(request)
+
+        link = unlock(
+            option,
+            client=_client(gone_is_gone),
+            cache=cache,
+        )
+
+        assert "cached" not in link.strategy
+        assert link.url.endswith(".mkv")
+
+    def test_the_cache_is_optional(
+        self,
+    ) -> None:
+        """
+        Tests must not share a cache, and neither should a caller who
+        has not asked for one.
+        """
+
+        link = unlock(
+            _option("https://hubcdn.club/file/A"),
+            client=_client(_hubcdn_handler),
+        )
+
+        assert link.strategy == "hubcdn"
+
+    def test_a_cache_write_failure_does_not_fail_the_download(
+        self,
+        tmp_path,
+    ) -> None:
+        """
+        The disk being full, read-only or full of nonsense must not
+        stop a file that is otherwise ready to arrive.
+        """
+
+        class Broken:
+            """A cache whose disk has given up."""
+
+            def get(self, url: str) -> None:
+                return None
+
+            def put(self, *args: object, **kwargs: object) -> None:
+                raise OSError("no space left on device")
+
+        link = unlock(
+            _option("https://hubcdn.club/file/A"),
+            client=_client(_hubcdn_handler),
+            cache=Broken(),  # type: ignore[arg-type]
+        )
+
+        assert link.url.endswith(".mkv")
+
+
 class TestUnlock:
     def test_routes_by_host(self) -> None:
         link = unlock(

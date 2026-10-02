@@ -691,7 +691,7 @@ class TestStartDownload:
         monkeypatch.setattr(
             flow.unlock,
             "unlock",
-            lambda option, client=None: UnlockedLink(
+            lambda option, client=None, cache=None: UnlockedLink(
                 url="https://cdn.test/real.mkv",
                 filename=filename,
                 host="cdn.test",
@@ -730,7 +730,7 @@ class TestStartDownload:
         the whole session over one bad option.
         """
 
-        def failing(option, client=None):
+        def failing(option, client=None, cache=None):
             raise ResolutionError("the site deleted this file")
 
         monkeypatch.setattr(flow.unlock, "unlock", failing)
@@ -743,7 +743,7 @@ class TestStartDownload:
         monkeypatch: pytest.MonkeyPatch,
         screen: io.StringIO,
     ) -> None:
-        def failing(option, client=None):
+        def failing(option, client=None, cache=None):
             raise NetworkError("the site did not answer")
 
         monkeypatch.setattr(flow.unlock, "unlock", failing)
