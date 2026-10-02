@@ -42,8 +42,12 @@ that a browser is needed.
 
 ```bash
 hdhub4u              # search the site, then pick and download
-hdhub4u browse dune  # start with the query filled in
+hdhub4u dune         # start with the query filled in
 ```
+
+A bare word is the search, so `hdhub4u dune` and `hdhub4u browse dune`
+are the same thing. A title with spaces needs quotes:
+`hdhub4u "the big boss"`.
 
 Type a name, pick a result, pick a quality, confirm, and the file lands
 in `downloads/`. `n` goes to the next page of results, `b` starts a new
@@ -53,33 +57,73 @@ search, `q` quits.
 
 ```bash
 hdhub4u search "big boss"           # list matches, no prompts
-hdhub4u search "big boss" --limit 5
+hdhub4u search "big boss" --json    # same, as JSON
 hdhub4u status                      # where data lives, what is reachable
-hdhub4u links prune                 # drop cached resolutions
 ```
+
+Output follows the destination. On a terminal, results are a table.
+Redirected, they are plain records: an indexed title, then the address
+on its own line, with nothing to strip.
+
+```
+$ hdhub4u search "big boss" | grep '^ '
+     https://new1.hdhub4u.free/big-boss-2021-hindi-webrip/
+```
+
+`--json` is the documented shape for anything a script reads:
+
+```json
+{
+  "query": "big boss",
+  "count": 1,
+  "results": [
+    {
+      "title": "Big Boss (2021) WEB-DL 1080p",
+      "url": "https://new1.hdhub4u.free/big-boss-2021-hindi-webrip/",
+      "type": "movie",
+      "quality": "1080P",
+      "year": "2021"
+    }
+  ]
+}
+```
+
+`type` and `quality` are carried here even when the table leaves them
+out for width. An empty result set is still valid JSON, with
+`"count": 0`. `NO_COLOR` and `FORCE_COLOR` are both honoured.
 
 Exit codes are `0` on success (including a deliberate quit), `1` when
 nothing was found or a step failed, and `130` on interrupt, so a
 wrapper script can tell the outcomes apart.
 
-Run `hdhub4u --help` for the full list.
+Run `hdhub4u --help` for the front door, and `hdhub4u <command> --help`
+for one command.
+
+## Maintenance commands
+
+Three commands exist for looking after the tool rather than for using
+it. They work exactly as they always did, and they are deliberately
+absent from `hdhub4u --help`:
+
+```bash
+hdhub4u index               # rebuild the offline index by crawling
+hdhub4u index --browser     # render each page instead of fetching it
+hdhub4u links prune         # drop expired cached resolutions
+hdhub4u links clear         # drop all of them
+hdhub4u render <url>        # what a real browser sees on one page
+```
+
+`render` also takes `--screenshot out.png` and `--selector ".links"`.
+It reports what the page advertises. It does not click through a gate,
+wait out a countdown, or read a token out of script state; those pages
+are answered with a clear "this needs a browser" message instead.
 
 ## JavaScript-only pages
 
 Some pages return a shell to a plain HTTP fetch, so the title comes
 back empty. With the `browser` extra installed, the indexer can render
-each page in a real browser instead:
-
-```bash
-hdhub4u index --browser
-hdhub4u render <url>                     # what the rendered DOM holds
-hdhub4u render <url> --screenshot out.png
-hdhub4u render <url> --selector ".links" # wait for a selector first
-```
-
-`render` reports what the page advertises. It does not click through a
-gate, wait out a countdown, or read a token out of script state; those
-pages are answered with a clear "this needs a browser" message instead.
+each page in a real browser instead -- see `hdhub4u index --browser`
+above.
 
 ## The offline index
 
@@ -154,4 +198,7 @@ python -m isort --check-only src/ tests/
 
 Tests marked `live` touch the network and are excluded from the default
 run. Logs go to stderr so they never corrupt the rendered tables; raise
-verbosity with `--log-level DEBUG` or `HDHUB_LOG_LEVEL=DEBUG`.
+verbosity with `--log-level DEBUG` or `HDHUB_LOG_LEVEL=DEBUG`. The
+option is accepted on either side of the command name, so both
+`hdhub4u --log-level DEBUG search x` and `hdhub4u search x --log-level
+DEBUG` work.

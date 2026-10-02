@@ -2,71 +2,88 @@
 
 from __future__ import annotations
 
+import io
+import json
 import shutil
 import subprocess
 
+from rich.console import Console
+
 from hdhub4u import ui
 from hdhub4u.ui import (
+    ResultRow,
     copy_to_clipboard,
-    format_type,
     print_error,
+    print_json_results,
+    print_plain_results,
     print_results,
-    shorten_title,
     show_status,
     terminal_width,
 )
 
-
-def test_shorten_title_keeps_short_text() -> None:
-    assert shorten_title("Big Boss") == "Big Boss"
+_BOX_CHARS = "┏┓┗┛━┳┻╋┃│┡┩└┘├┤─"
 
 
-def test_shorten_title_truncates_long_text() -> None:
-    result = shorten_title(
-        "A" * 80,
-        max_length=20,
+def _rows() -> list[ResultRow]:
+    return [
+        ResultRow(
+            title="Big Boss Full Series",
+            url="https://site.test/a",
+            kind="series",
+            quality="1080P 720P",
+            year="2020",
+        ),
+        ResultRow(
+            title="Dune",
+            url="https://site.test/b",
+            kind="movie",
+            quality="1080P",
+            year="2024",
+        ),
+    ]
+
+
+def _rows_as_plain(rows) -> str:
+    """Return the plain rendering of rows, without Rich."""
+
+    return "\n".join(
+        f"{number:3}. [{row.kind or 'item'}] {row.title}\n"
+        f"     {row.url}"
+        for number, row in enumerate(rows, start=1)
+    ) + "\n"
+
+
+def _make_console(
+    monkeypatch,
+    *,
+    terminal: bool,
+) -> io.StringIO:
+    """
+    Swap in a real Console with the wanted terminal-ness.
+
+    A real Console rather than a stub, because ``is_terminal`` is a
+    read-only property derived from the file, the environment and
+    ``FORCE_COLOR`` -- a fake attribute would pin the test to
+    whatever this implementation does rather than to the behaviour
+    being promised.
+
+    Returns:
+        The buffer the console now writes to.
+    """
+
+    buffer = io.StringIO()
+
+    monkeypatch.setattr(
+        ui,
+        "console",
+        Console(
+            file=buffer,
+            force_terminal=terminal or None,
+            width=100,
+        ),
     )
 
-    assert result.endswith("...")
-    assert len(result) <= 20
-
-
-def test_shorten_title_collapses_whitespace() -> None:
-    assert (
-        shorten_title("a   b\n c")
-        == "a b c"
-    )
-
-
-def test_format_type_known_label() -> None:
-    assert "Movie" in format_type("movie")
-    assert "Web Series" in format_type("webseries")
-
-
-def test_format_type_unknown_label_is_untitled() -> None:
-    assert "Trailer" in format_type("trailer")
-
-
-def test_print_results_handles_empty(capsys) -> None:
-    print_results([])
-
-    assert "No relevant results" in capsys.readouterr().out
-
-
-def test_print_results_lists_items(capsys) -> None:
-    print_results(
-        [
-            {
-                "title": "Big Boss Full Series",
-                "url": "https://site.test/a",
-                "type": "webseries",
-            },
-        ]
-    )
-
-    output = capsys.readouterr().out
-
-    assert "Big Boss" in output
+    return buffer
 
 
 def test_print_error_shows_message(capsys) -> None:
@@ -79,16 +96,309 @@ def test_terminal_width_is_positive() -> None:
     assert terminal_width() > 0
 
 
-def test_copy_to_clipboard_without_utility(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        shutil,
-        "which",
-        lambda _: None,
-    )
+class TestPlainResults:
+    """
+    A pipe gets plain records. The table is made of box-drawing
+    characters, and a script reading a redirect has to strip all of
+    them before it can match anything.
+    """
 
-    assert copy_to_clipboard("text") is False
+    def test_no_row_uses_a_box_character(
+        self,
+        capsys,
+    ) -> None:
+        print_plain_results(
+            _rows(),
+            query="big boss",
+        )
+
+        printed = capsys.readouterr().out
+
+        for character in _BOX_CHARS:
+            assert character not in printed
+
+    def test_the_trailer_is_absent(
+        self,
+        capsys,
+    ) -> None:
+        """
+        "page 1 - 2 shown" is a fact about a rendering, and says
+        nothing a reader of records can act on.
+        """
+
+        print_plain_results(
+            _rows(),
+            query="big boss",
+        )
+
+        printed = capsys.readouterr().out
+
+        assert "page" not in printed
+        assert "shown" not in printed
+
+    def test_each_row_prints_a_title_and_an_address(
+        self,
+        capsys,
+    ) -> None:
+        print_plain_results(
+            _rows(),
+            query="big boss",
+        )
+
+        printed = capsys.readouterr().out
+
+        assert "Big Boss Full Series" in printed
+        assert "https://site.test/a" in printed
+
+    def test_the_address_is_on_a_line_of_its_own(
+        self,
+        capsys,
+    ) -> None:
+        """
+        So a reader can take every address without the title text in
+        the way, using cut or grep rather than a regular expression.
+        """
+
+        print_plain_results(
+            _rows(),
+            query="x",
+        )
+
+        lines = capsys.readouterr().out.splitlines()
+
+        assert lines[1] == "     https://site.test/a"
+
+    def test_nothing_matches_is_reported_on_stderr(
+        self,
+        capsys,
+    ) -> None:
+        """
+        An empty result is not data. Stderr keeps stdout parseable,
+        and the exit code is 1 either way.
+        """
+
+        print_plain_results([], query="nothing")
+
+        captured = capsys.readouterr()
+
+        assert captured.out == ""
+        assert "nothing" in captured.err
+
+
+class TestJsonResults:
+    def test_the_shape_is_stable(
+        self,
+        capsys,
+    ) -> None:
+        print_json_results(
+            _rows(),
+            query="big boss",
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload["query"] == "big boss"
+        assert payload["count"] == 2
+        assert len(payload["results"]) == 2
+
+    def test_every_field_a_table_hides_is_present(
+        self,
+        capsys,
+    ) -> None:
+        """
+        The table drops Type and Quality for width. A script must
+        still get them, or dropping the columns would be losing data
+        rather than rearranging it.
+        """
+
+        print_json_results(
+            _rows(),
+            query="big boss",
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+        first = payload["results"][0]
+
+        assert first["type"] == "series"
+        assert first["quality"] == "1080P 720P"
+        assert first["year"] == "2020"
+        assert first["url"] == "https://site.test/a"
+
+    def test_no_matches_is_still_valid_json(
+        self,
+        capsys,
+    ) -> None:
+        """
+        Emitting nothing at all, or a sentence, is what a consumer
+        cannot read. An empty result set is a fact with a shape.
+        """
+
+        print_json_results([], query="nothing")
+
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload["count"] == 0
+        assert payload["results"] == []
+
+    def test_a_title_full_of_markup_stays_a_title(
+        self,
+        capsys,
+    ) -> None:
+        """
+        Site-controlled text reaches JSON as data. It is not markup
+        here, so nothing is swallowed and nothing is restyled.
+        """
+
+        print_json_results(
+            [ResultRow(title="Dune [/] [red]", url="u")],
+            query="dune",
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+
+        assert (
+            payload["results"][0]["title"]
+            == "Dune [/] [red]"
+        )
+
+
+class TestPrintResultsRouting:
+    def test_json_wins_over_a_terminal(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        _make_console(
+            monkeypatch,
+            terminal=True,
+        )
+
+        print_results(
+            _rows(),
+            query="big boss",
+            as_json=True,
+        )
+
+        printed = capsys.readouterr().out
+
+        assert printed.lstrip().startswith("{")
+        assert "┏" not in printed
+
+    def test_a_terminal_gets_a_table(
+        self,
+        monkeypatch,
+    ) -> None:
+        buffer = _make_console(
+            monkeypatch,
+            terminal=True,
+        )
+
+        print_results(
+            _rows(),
+            query="big boss",
+        )
+
+        printed = buffer.getvalue()
+
+        assert "┏" in printed
+        assert "Big Boss Full Series" in printed
+
+    def test_a_pipe_gets_plain_text(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        _make_console(
+            monkeypatch,
+            terminal=False,
+        )
+
+        print_results(
+            _rows(),
+            query="big boss",
+        )
+
+        printed = capsys.readouterr().out
+
+        assert printed == _rows_as_plain(_rows())
+
+
+class TestWantsTable:
+    def test_a_pipe_is_not_a_terminal(
+        self,
+        monkeypatch,
+    ) -> None:
+        _make_console(
+            monkeypatch,
+            terminal=False,
+        )
+
+        assert ui.wants_table() is False
+
+    def test_a_terminal_is_a_terminal(
+        self,
+        monkeypatch,
+    ) -> None:
+        _make_console(
+            monkeypatch,
+            terminal=True,
+        )
+
+        assert ui.wants_table() is True
+
+    def test_no_color_keeps_the_table(
+        self,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        """
+        NO_COLOR is about colour, not shape. Dropping to plain text
+        because someone muted their terminal would answer a
+        different question than the one they asked.
+        """
+
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        _make_console(
+            monkeypatch,
+            terminal=True,
+        )
+
+        assert ui.wants_table() is True
+
+    def test_force_color_opts_a_pipe_back_into_the_table(
+        self,
+        monkeypatch,
+    ) -> None:
+        """
+        A redirect asked for in colour should still get a table.
+        Rich reads FORCE_COLOR into is_terminal, so the gate needs no
+        separate handling.
+        """
+
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        _make_console(
+            monkeypatch,
+            terminal=False,
+        )
+
+        assert ui.wants_table() is True
+
+
+class TestCopyToClipboard:
+    def test_without_utility(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda _: None,
+        )
+
+        assert copy_to_clipboard("text") is False
 
 
 def test_copy_to_clipboard_uses_first_available(

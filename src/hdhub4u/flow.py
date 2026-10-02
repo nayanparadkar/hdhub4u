@@ -43,7 +43,15 @@ from .downloader import (
 )
 from .errors import DownloadError, HdHubError, ResolutionError
 from .project import get_downloads_dir
-from .ui import clear_screen, pause, print_error, print_header
+from .ui import (
+    ResultRow,
+    clear_screen,
+    pause,
+    print_error,
+    print_header,
+    print_results,
+    print_table_results,
+)
 
 console = Console()
 
@@ -123,69 +131,62 @@ def render_results(
     query: str,
     page: int,
 ) -> None:
-    """Print a numbered result table."""
+    """
+    Print a numbered result table.
 
-    if not items:
-        note = Text(
-            f"Nothing matched '{query}'.\n"
-            "Try a shorter spelling, or the "
-            "original English title.",
-        )
+    A thin adapter over the shared table renderer, so the interactive
+    list, a piped listing and ``--json`` are the same rows.
+    """
 
-        console.print(
-            Panel(
-                note,
-                border_style="yellow",
-                title="No results",
-            )
-        )
-        return
-
-    table = Table(
-        show_header=True,
-        header_style="bold cyan",
-        border_style="dim",
-        expand=False,
-    )
-
-    table.add_column("#", justify="right", width=4)
-    table.add_column("Title", min_width=34, max_width=58)
-    table.add_column("Year", justify="right", width=6)
-    table.add_column("Type", width=12)
-    table.add_column("Quality", width=18)
-
-    for number, item in enumerate(items, start=1):
-        # Titles are site-controlled, so the cell is a Text: Rich
-        # would otherwise read a title of "[/]" as markup and drop
-        # it from the table.
-        table.add_row(
-            str(number),
-            Text(item.short_title(56)),
-            Text(item.year or "-"),
-            _kind_label(item),
-            _quality_label(item),
-        )
-
-    console.print(table)
-    console.print(
-        f"[dim]page {page} · {len(items)} shown[/dim]"
+    print_table_results(
+        as_rows(items),
+        query=query,
+        page=page,
     )
 
 
-def _kind_label(
+def as_rows(
+    items: Sequence[CatalogItem],
+) -> list[ResultRow]:
+    """
+    Convert catalog results into the shared printing shape.
+
+    Both output paths -- the terminal table and ``--json`` -- read
+    these, so a script sees every field the table decides not to show.
+    """
+
+    return [
+        ResultRow(
+            title=item.title,
+            url=item.url,
+            kind=_item_kind(item),
+            quality=_quality_label(item),
+            year=item.year,
+        )
+        for item in items
+    ]
+
+
+def _item_kind(
     item: CatalogItem,
 ) -> str:
-    """Return a short series/movie label for a result row."""
+    """
+    Return the machine kind of a result: series, movie, or empty.
+
+    Lowercase and stable, because this is what reaches ``--json``.
+    The table renders a display name for it, so a script does not have
+    to match on capitalisation chosen for a human.
+    """
 
     joined = " ".join(item.categories).lower()
 
     if "series" in joined or "episode" in joined:
-        return "Series"
+        return "series"
 
     if item.imdb_id:
-        return "Movie"
+        return "movie"
 
-    return "-"
+    return ""
 
 
 def _quality_label(
@@ -193,21 +194,7 @@ def _quality_label(
 ) -> str:
     """Return the resolutions a result's title advertises."""
 
-    found: list[str] = []
-
-    for part in item.title.replace("/", " ").split():
-        token = part.strip("[]()[],:").lower()
-
-        if (
-            token in {"480p", "720p", "1080p", "2160p", "4k"}
-            and token not in found
-        ):
-            found.append(token.upper())
-
-    if not found:
-        return "-"
-
-    return " ".join(found[:4])
+    return catalog.title_quality(item.title) or "-"
 
 
 def _parse_choice(
@@ -672,6 +659,7 @@ def run_search(
     *,
     limit: int = catalog.DEFAULT_LIMIT,
     interactive: bool = True,
+    as_json: bool = False,
     client: httpx.Client | None = None,
 ) -> int:
     """
@@ -681,6 +669,8 @@ def run_search(
         query: What to search for.
         limit: Results per page.
         interactive: When False, list the results and stop.
+        as_json: Print one JSON object instead of a table. Implies
+            non-interactive output regardless of the terminal.
         client: Optional caller-owned HTTP client.
 
     Returns:
@@ -712,7 +702,11 @@ def run_search(
                 print_error(f"Search failed.\n{error}")
                 return 1
 
-            render_results(items, query, 1)
+            print_results(
+                as_rows(items),
+                query=query,
+                as_json=as_json,
+            )
 
             return 0 if items else 1
 

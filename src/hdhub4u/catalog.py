@@ -102,6 +102,41 @@ _RESOLUTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+#: Quality tokens a site's own title may carry, matched whole so a
+#: title containing "4k" in a longer word is not read as 4K.
+QUALITY_TOKENS = ("480p", "720p", "1080p", "2160p", "4k")
+
+
+def title_quality(
+    title: str,
+    *,
+    limit: int = 4,
+) -> str:
+    """
+    Return the resolutions a title advertises, in written order.
+
+    The site's titles carry their own quality, so this reads it off
+    the title rather than making a second request to ask. Returns
+    uppercase and space separated, e.g. ``"1080P 720P"``, or an empty
+    string when the title names no resolution.
+
+    Args:
+        title: A post title as the site wrote it.
+        limit: Maximum number of resolutions to report.
+    """
+
+    seen: list[str] = []
+    labels: list[str] = []
+
+    for part in title.replace("/", " ").split():
+        token = part.strip("[]()[],:").lower()
+
+        if token in QUALITY_TOKENS and token not in seen:
+            seen.append(token)
+            labels.append(token.upper())
+
+    return " ".join(labels[:limit])
+
 
 @dataclass(frozen=True)
 class CatalogItem:
@@ -114,25 +149,6 @@ class CatalogItem:
     categories: tuple[str, ...] = ()
     stars: tuple[str, ...] = ()
     imdb_id: str = ""
-
-    def short_title(self, width: int = 70) -> str:
-        """
-        Return the title trimmed to a terminal-friendly width.
-
-        A width of zero or less has no room for an ellipsis, so the
-        title is simply cut. The old arithmetic asked for
-        ``width - 1`` characters and appended a character, which
-        silently produced the whole title when there was no space
-        for it, and indexed from the end on a negative width.
-        """
-
-        if width <= 0:
-            return ""
-
-        if len(self.title) <= width:
-            return self.title
-
-        return f"{self.title[: width - 1].rstrip()}…"
 
 
 @dataclass(frozen=True)

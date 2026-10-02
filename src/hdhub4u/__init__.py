@@ -1,16 +1,19 @@
 """HDHub4U media downloader.
 
-A CLI that crawls a media catalog into a local SQLite index, searches
-it, and downloads selected qualities from the results.
+Searches the live site for a title and transfers the file behind the
+link it picks.
 
 Entry points:
     hdhub4u                    interactive search
-    hdhub4u search "title"     non-interactive search
-    hdhub4u index              rebuild the local index
-    hdhub4u status             index size and data locations
-    hdhub4u links prune        drop expired cached links
+    hdhub4u dune               the same, with the query filled in
+    hdhub4u search "title"     non-interactive search, as a table or
+                               as plain records or JSON
+    hdhub4u status             data locations and what is reachable
+
+Maintenance commands (``index``, ``links``, ``render``) are hidden from
+``--help`` and documented in the README.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__"]

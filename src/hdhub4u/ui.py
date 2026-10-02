@@ -1,10 +1,13 @@
 """Terminal rendering, clipboard and browser helpers."""
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 import webbrowser
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,6 +15,245 @@ from rich.table import Table
 from rich.text import Text
 
 console = Console()
+
+
+@dataclass(frozen=True)
+class ResultRow:
+    """
+    One search result, in the one shape every printer agrees on.
+
+    The live catalog and the offline index disagree about almost
+    everything -- one yields dataclasses, the other dictionaries, and
+    neither names quality the same way. Both are converted to this
+    before printing, so a table, a pipe and ``--json`` cannot drift
+    apart.
+
+    Fields are all optional except ``title`` and ``url`` because the
+    two sources carry different amounts of detail. ``kind`` and
+    ``quality`` are what the interactive table does not show; they
+    reach a script through ``--json`` rather than being thrown away.
+    """
+
+    title: str
+    url: str
+    kind: str = ""
+    quality: str = ""
+    year: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        """Return the row as a JSON-ready mapping."""
+
+        return {
+            "title": self.title,
+            "url": self.url,
+            "type": self.kind,
+            "quality": self.quality,
+            "year": self.year,
+        }
+
+
+def wants_table() -> bool:
+    """
+    Return True when results should be drawn as a table.
+
+    A terminal gets the table; a pipe gets plain records, because
+    box-drawing characters in a redirect are noise a script has to
+    strip. Rich already resolves ``FORCE_COLOR`` and ``NO_COLOR`` into
+    ``is_terminal`` and ``no_color``, so the usual environment
+    variables work with no extra code here -- and ``FORCE_COLOR``
+    correctly opts a redirected stream back into the table.
+    """
+
+    return console.is_terminal
+
+
+def print_plain_results(
+    rows: Sequence[ResultRow],
+    *,
+    query: str,
+) -> None:
+    """
+    Print results as plain lines for a pipe or a file.
+
+    Two lines per result: an indexed title, then the address on its
+    own line so it can be read with ``grep '^ '`` or ``cut`` without
+    the title interfering.
+    """
+
+    if not rows:
+        _report_no_matches(query)
+
+        return
+
+    for number, row in enumerate(rows, start=1):
+        label = row.kind or "item"
+
+        print(f"{number:3}. [{label}] {row.title}")
+        print(f"     {row.url}")
+
+
+def print_json_results(
+    rows: Sequence[ResultRow],
+    *,
+    query: str,
+) -> None:
+    """
+    Print results as a single JSON object.
+
+    A documented shape, always wrapped in an object with ``query``,
+    ``count`` and ``results``, so an empty result set is still valid
+    JSON. Emitting nothing at all when there are no matches is what a
+    consumer cannot read.
+    """
+
+    print(
+        json.dumps(
+            {
+                "query": query,
+                "count": len(rows),
+                "results": [
+                    row.as_dict() for row in rows
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+#: Display names for the machine kinds a row carries, so the table
+#: reads properly while ``--json`` keeps a stable lowercase value.
+KIND_LABELS = {
+    "series": "Series",
+    "movie": "Movie",
+}
+
+
+def print_table_results(
+    rows: Sequence[ResultRow],
+    *,
+    query: str = "",
+    page: int = 1,
+) -> None:
+    """
+    Draw results as a table for a terminal.
+
+    An empty result set gets a panel saying so rather than a table
+    with a header and no rows, which reads as a rendering fault
+    instead of a fact about the search.
+    """
+
+    if not rows:
+        note = Text(
+            f"Nothing matched '{query}'.\n"
+            "Try a shorter spelling, or the "
+            "original English title.",
+        )
+
+        console.print(
+            Panel(
+                note,
+                border_style="yellow",
+                title="No results",
+            )
+        )
+
+        return
+
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        expand=False,
+    )
+
+    table.add_column(
+        "#",
+        justify="right",
+        width=4,
+    )
+    table.add_column(
+        "Title",
+        min_width=34,
+        max_width=58,
+    )
+    table.add_column(
+        "Year",
+        justify="right",
+        width=6,
+    )
+    table.add_column(
+        "Type",
+        width=12,
+    )
+    table.add_column(
+        "Quality",
+        width=18,
+    )
+
+    for number, row in enumerate(rows, start=1):
+        # Titles are site-controlled, so the cell is a Text: Rich
+        # would otherwise read a title of "[/]" as markup and drop it.
+        table.add_row(
+            str(number),
+            Text(row.title),
+            Text(row.year or "-"),
+            KIND_LABELS.get(row.kind, "-"),
+            row.quality or "-",
+        )
+
+    console.print(table)
+    console.print(
+        f"[dim]page {page} · {len(rows)} shown[/dim]"
+    )
+
+
+def print_results(
+    rows: Sequence[ResultRow],
+    *,
+    query: str,
+    as_json: bool = False,
+    page: int = 1,
+) -> None:
+    """
+    Print results to whichever destination asked for them.
+
+    Three destinations, one order of preference: ``--json`` wins, then
+    a terminal, then a plain pipe. Every caller goes through here
+    rather than choosing a renderer, so the live search, the offline
+    index and ``--json`` cannot drift apart -- and so a pipe never
+    receives the box-drawing characters a table is made of.
+
+    Args:
+        rows: The results to print.
+        query: The query they came from, echoed in JSON output.
+        as_json: Emit one JSON object instead of a table.
+        page: 1-based result page, shown in the table footer.
+    """
+
+    if as_json:
+        print_json_results(rows, query=query)
+
+    elif wants_table():
+        print_table_results(rows, query=query, page=page)
+
+    else:
+        print_plain_results(rows, query=query)
+
+
+def _report_no_matches(query: str) -> None:
+    """
+    Say on stderr that nothing matched.
+
+    stderr, not stdout: an empty result is not data, and a consumer
+    reading stdout gets nothing to parse rather than a sentence. The
+    exit code is 1 either way, so the failure is still visible.
+    """
+
+    print(
+        f"No matches for {query!r}.",
+        file=sys.stderr,
+    )
 
 
 def clear_screen() -> None:
@@ -76,116 +318,6 @@ def print_header(
             ),
         )
     )
-
-
-def format_type(
-    media_type: str,
-) -> str:
-    labels = {
-        "movie": (
-            "Movie",
-            "magenta",
-        ),
-        "webseries": (
-            "Web Series",
-            "blue",
-        ),
-        "episode": (
-            "Episode",
-            "yellow",
-        ),
-        "watch": (
-            "Watch",
-            "cyan",
-        ),
-    }
-
-    label, style = labels.get(
-        media_type,
-        (
-            media_type.title(),
-            "white",
-        ),
-    )
-
-    return (
-        f"[{style}]"
-        f"{label}"
-        f"[/{style}]"
-    )
-
-
-def shorten_title(
-    title: str,
-    max_length: int = 55,
-) -> str:
-    title = " ".join(
-        title.split()
-    )
-
-    if len(title) <= max_length:
-        return title
-
-    return (
-        title[: max_length - 3].rstrip()
-        + "..."
-    )
-
-
-def print_results(
-    results: list[dict[str, object]],
-) -> None:
-    if not results:
-        console.print(
-            Panel(
-                "No relevant results found.",
-                border_style="yellow",
-                title="Search",
-            )
-        )
-        return
-
-    table = Table(
-        show_header=True,
-        header_style="bold cyan",
-        border_style="dim",
-        expand=False,
-    )
-
-    table.add_column(
-        "#",
-        justify="right",
-        width=4,
-    )
-
-    table.add_column(
-        "Title",
-        min_width=35,
-        max_width=60,
-    )
-
-    table.add_column(
-        "Type",
-        width=14,
-    )
-
-    for number, item in enumerate(
-        results,
-        start=1,
-    ):
-        title = shorten_title(
-            str(item["title"])
-        )
-
-        table.add_row(
-            str(number),
-            title,
-            format_type(
-                str(item["type"])
-            ),
-        )
-
-    console.print(table)
 
 
 def print_selected(

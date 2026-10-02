@@ -7,7 +7,6 @@ import pytest
 
 from hdhub4u import catalog
 from hdhub4u.catalog import (
-    CatalogItem,
     MediaOption,
     classify_kind,
     download_options,
@@ -19,6 +18,7 @@ from hdhub4u.catalog import (
     registrable_host,
     result_count,
     search_catalog,
+    title_quality,
 )
 from hdhub4u.errors import NetworkError, ParseError
 
@@ -452,38 +452,59 @@ class TestLabelHelpers:
         assert extract_size_label("Full Movie") == ""
 
 
-class TestCatalogItem:
-    def test_shortens_a_long_title(self) -> None:
-        item = CatalogItem(title="x" * 100, url="u")
+class TestTitleQuality:
+    """
+    The site's titles carry their own quality, so it is read off the
+    title rather than making a second request to ask. It reaches the
+    terminal table and the --json escape hatch alike, so both agree.
+    """
 
-        assert len(item.short_title(20)) <= 20
+    def test_reads_what_the_title_says(self) -> None:
+        title = "Dune (2024) 4K 1080p 720p 480p Dual Audio"
 
-    def test_leaves_a_short_title_alone(self) -> None:
-        item = CatalogItem(title="Dune", url="u")
+        assert title_quality(title) == "4K 1080P 720P 480P"
 
-        assert item.short_title(20) == "Dune"
-
-    def test_a_width_of_zero_gives_nothing(self) -> None:
+    def test_reports_in_the_order_written(self) -> None:
         """
-        There is no room for an ellipsis at width zero, so the
-        answer is the empty string. Slicing by ``width - 1`` used to
-        ask for negative one character and hand back the whole
-        title.
-        """
-
-        item = CatalogItem(title="Dune", url="u")
-
-        assert item.short_title(0) == ""
-
-    def test_a_negative_width_gives_nothing(self) -> None:
-        """
-        A negative width indexed from the end of the string, which
-        is not a truncation at all.
+        Newest first is how the site writes it, and a release is
+        listed largest-first for a reason: the order is information.
         """
 
-        item = CatalogItem(title="Dune: Part Two", url="u")
+        assert (
+            title_quality("Show 1080p 720p 480p")
+            == "1080P 720P 480P"
+        )
 
-        assert item.short_title(-5) == ""
+    def test_repeats_are_reported_once(self) -> None:
+        assert title_quality("Show 720p 720p") == "720P"
+
+    def test_a_title_naming_nothing_gives_nothing(self) -> None:
+        """
+        The caller turns an empty answer into a placeholder, so it
+        must be empty rather than a guess.
+        """
+
+        assert title_quality("Dune Full Movie") == ""
+
+    def test_only_whole_tokens_count(self) -> None:
+        """
+        "1080px" is not a resolution the release advertises, and
+        reading it as one would report a quality that is not there.
+        """
+
+        assert title_quality("Show 1080px") == ""
+
+    def test_bracketed_tokens_are_understood(self) -> None:
+        assert title_quality("Show [1080p] (720p)") == "1080P 720P"
+
+    def test_a_slash_does_not_hide_a_resolution(self) -> None:
+        assert title_quality("Show 1080p/720p") == "1080P 720P"
+
+    def test_the_count_is_capped(self) -> None:
+        assert (
+            len(title_quality("Show 480p 720p 1080p 2160p 4k").split())
+            == 4
+        )
 
 
 class TestResultCount:
