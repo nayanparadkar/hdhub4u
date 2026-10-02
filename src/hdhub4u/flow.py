@@ -22,11 +22,13 @@ from __future__ import annotations
 from typing import Sequence
 
 import httpx
+from rich.console import Group
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import catalog, unlock
+from . import catalog, keys, unlock
 from .catalog import (
     DOWNLOAD_KIND,
     SITE_ORIGIN,
@@ -289,6 +291,75 @@ def _user_agent() -> str:
     return USER_AGENT
 
 
+def option_table(
+    options: Sequence[MediaOption],
+    *,
+    cursor: int | None = None,
+) -> Table:
+    """
+    Build the option table for a chosen title.
+
+    Four columns: number, quality, size, kind. The host went because
+    it is the one column nobody chooses on -- a user picks a
+    resolution and a size, and every host here is an interchangeable
+    CDN -- and five columns plus borders did not fit a narrow terminal.
+
+    The title is the widest cell and is left unbounded so it wraps.
+    Its earlier ``[:34]`` slice was a truncation that no width asked
+    for: it cut at 80 columns and at 140 alike.
+
+    Args:
+        options: The options to show.
+        cursor: Zero-based row to highlight, or None for a plain
+            listing with no selection in it.
+
+    Returns:
+        A table, unprinted, so a caller can redraw it in place.
+    """
+
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        expand=True,
+    )
+
+    table.add_column(
+        "#",
+        justify="right",
+        width=4,
+    )
+    table.add_column("Quality")
+    table.add_column(
+        "Size",
+        justify="right",
+        width=9,
+    )
+    table.add_column(
+        "Kind",
+        width=11,
+    )
+
+    for number, option in enumerate(options):
+        kind = (
+            "Download"
+            if option.kind == DOWNLOAD_KIND
+            else "Stream"
+        )
+
+        # label and size_label are scraped from a post page, so the
+        # cells are Text rather than markup.
+        table.add_row(
+            str(number + 1),
+            Text(option.label),
+            Text(option.size_label or "-"),
+            kind,
+            style="bold reverse" if number == cursor else None,
+        )
+
+    return table
+
+
 def render_options(
     item: CatalogItem,
     options: Sequence[MediaOption],
@@ -322,37 +393,21 @@ def render_options(
         )
         return
 
-    table = Table(
-        show_header=True,
-        header_style="bold cyan",
-        border_style="dim",
-        expand=False,
-    )
+    console.print(option_table(options))
+    console.print(_OPTION_HELP)
 
-    table.add_column("#", justify="right", width=4)
-    table.add_column("Quality", min_width=18, max_width=34)
-    table.add_column("Size", justify="right", width=9)
-    table.add_column("Kind", width=11)
-    table.add_column("Host", width=20)
 
-    for number, option in enumerate(options, start=1):
-        kind = (
-            "Download"
-            if option.kind == DOWNLOAD_KIND
-            else "Stream"
-        )
-
-        # label and size_label are scraped from a post page, so the
-        # cells are Text rather than markup.
-        table.add_row(
-            str(number),
-            Text(option.label[:34]),
-            Text(option.size_label or "-"),
-            kind,
-            Text(option.host[:20]),
-        )
-
-    console.print(table)
+#: The one line of keys under the option table. Kept as a constant so
+#: the drawing and the key handling cannot disagree about what is
+#: offered -- which is the bug that made "d" work and nothing say so.
+_OPTION_HELP = (
+    "[bold]↑↓[/bold] move  "
+    "[bold]Enter[/bold] choose  "
+    "[bold]d[/bold] downloads  "
+    "[bold]s[/bold] streams  "
+    "[bold]b[/bold] back  "
+    "[bold]q[/bold] quit"
+)
 
 
 def choose_option(
@@ -361,11 +416,155 @@ def choose_option(
     """
     Let the user pick one option.
 
-    Returns None to step back out of the title entirely.
+    Arrow keys on a terminal, a typed number anywhere else. Both reach
+    the same answer, and both are always live: a terminal can still be
+    driven by typing ``3``, so a pipeline through the picker is never
+    the only way through.
+
+    Returns:
+        The chosen option, or None to step back out of the title.
     """
 
     if not options:
         return None
+
+    if keys.can_read_keys():
+        return _choose_by_key(options)
+
+    return _choose_by_number(options)
+
+
+def _choose_by_key(
+    options: Sequence[MediaOption],
+) -> MediaOption | None:
+    """
+    Drive the option table with the arrow keys.
+
+    Redraws in place rather than scrolling, because a list of options
+    is something a person compares across: the sizes and the
+    resolutions have to stay on screen together while the cursor moves
+    over them.
+
+    Args:
+        options: The options offered.
+
+    Returns:
+        The chosen option, or None to step back.
+
+    Raises:
+        QuitFlow: when the user asks to quit.
+    """
+
+    visible = list(options)
+    cursor = 0
+
+    with Live(
+        console=console,
+        auto_refresh=False,
+        transient=True,
+    ) as live:
+        while True:
+            live.update(
+                Group(
+                    option_table(visible, cursor=cursor),
+                    _OPTION_HELP,
+                )
+            )
+
+            key = keys.read_key()
+
+            if key is None:
+                raise QuitFlow
+
+            if key in QUIT_WORDS:
+                raise QuitFlow
+
+            if key in BACK_WORDS or key == "esc":
+                return None
+
+            if key in {"up", "k"}:
+                cursor = (cursor - 1) % len(visible)
+                continue
+
+            if key in {"down", "j"}:
+                cursor = (cursor + 1) % len(visible)
+                continue
+
+            if key == "home":
+                cursor = 0
+                continue
+
+            if key == "end":
+                cursor = len(visible) - 1
+                continue
+
+            if key == "enter":
+                return visible[cursor]
+
+            if key == "d":
+                visible = _only(options, DOWNLOAD_KIND)
+                cursor = 0
+                continue
+
+            if key == "s":
+                visible = _only(options, "streaming")
+                cursor = 0
+                continue
+
+            if key == "a":
+                visible = list(options)
+                cursor = 0
+                continue
+
+            # A typed number jumps straight to a row, so the number
+            # somebody can see on screen is one they can type.
+            if key.isdecimal() and 1 <= int(key) <= len(visible):
+                return visible[int(key) - 1]
+
+            if key == "ctrl-c":
+                raise QuitFlow
+
+
+def _only(
+    options: Sequence[MediaOption],
+    kind: str,
+) -> list[MediaOption]:
+    """
+    Return the options of one kind, or all of them.
+
+    Falls back to the full list when a filter would leave nothing, so
+    pressing "s" on a downloads-only post cannot produce an empty
+    table with no way back except quit.
+    """
+
+    matches = [
+        option
+        for option in options
+        if option.kind == kind
+    ]
+
+    return matches or list(options)
+
+
+def _choose_by_number(
+    options: Sequence[MediaOption],
+) -> MediaOption | None:
+    """
+    Choose an option by typing its number.
+
+    The path taken when the input is a pipe or a file, where a
+    terminal cannot be put into raw mode and an arrow key would never
+    arrive as one character.
+
+    Args:
+        options: The options offered.
+
+    Returns:
+        The chosen option, or None to step back.
+
+    Raises:
+        QuitFlow: when the user asks to quit.
+    """
 
     console.print()
     console.print(" [bold]Enter option number[/bold]")

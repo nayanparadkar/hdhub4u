@@ -23,7 +23,10 @@ pip install -e ".[dev]"
 ```
 
 Python 3.11 or newer. No browser is required; the live path is plain
-HTTP.
+HTTP. Three dependencies, all pinned: BeautifulSoup for the post pages,
+httpx for the network, Rich for the terminal. The arrow-key picker is
+`termios` and `sys.stdin` from the standard library, so single-key
+input did not add a fourth.
 
 Pages that only exist after client-side script runs need one. Install
 the optional extra and its browser:
@@ -57,6 +60,13 @@ The result list is three columns: number, title, year. Quality and type
 are still in the output a script reads, and in the picker's own table
 once a result is chosen. The list is laid out to the terminal it is on,
 so it fits an 80-column window as well as a maximised one.
+
+Picking an option is done with the arrow keys, and the list redraws as
+the cursor moves so the sizes stay side by side. `Enter` chooses, `d`
+and `s` narrow to downloads or streams, `a` shows everything again, `b`
+goes back and `q` quits. Typing a number still works everywhere, so
+there is always a way through that is not the arrow keys. On a pipe,
+where a terminal cannot be put into raw mode, typing is the only path.
 
 ### Scriptable
 

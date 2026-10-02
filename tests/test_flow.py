@@ -12,14 +12,21 @@ markup, both of which fail in ways a user sees immediately.
 from __future__ import annotations
 
 import io
+import os
+import pty
 import sys
+import threading
+import time
 from pathlib import Path
+from typing import IO
 
 import httpx
 import pytest
 from rich.console import Console
 
-from hdhub4u import flow, ui
+from hdhub4u import flow
+from hdhub4u import keys as keys_mod
+from hdhub4u import ui
 from hdhub4u.catalog import (
     CatalogItem,
     MediaOption,
@@ -56,6 +63,40 @@ def _option(
         resolution=resolution,
         size_label=size_label,
     )
+
+
+def _as_chunks(pressed: bytes) -> list[bytes]:
+    """
+    Split a key sequence into whole keypresses.
+
+    One write per keypress with a pause between, which is both what a
+    keyboard does and what keeps a lone Escape distinguishable from
+    the start of an arrow key. Splitting per byte instead would deliver
+    an arrow key as three presses, which is the bug the real-terminal
+    tests exist to catch -- so this deliberately does not do that.
+    """
+
+    chunks: list[bytes] = []
+    rest = pressed
+
+    while rest:
+        if rest[:1] == b"\x1b" and len(rest) > 1:
+            length = 3 if rest[1:2] in (b"[", b"O") else 1
+        else:
+            length = 1
+
+        chunks.append(rest[:length])
+        rest = rest[length:]
+
+    return chunks
+
+
+def _pty_stream() -> tuple[int, IO]:
+    """Return a real terminal as a text stream, plus the other end."""
+
+    controller, terminal = pty.openpty()
+
+    return controller, os.fdopen(terminal, "r", encoding="utf-8")
 
 
 @pytest.fixture
@@ -256,6 +297,235 @@ class TestRenderOptions:
         flow.render_options(_item(), [])
 
         assert "No options" in screen.getvalue()
+
+
+class TestOptionTable:
+    def test_it_shows_four_columns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Number, quality, size, kind. Host went because nobody chooses
+        a download on which CDN carries it.
+        """
+
+        flow.render_options(_item(), [_option()])
+
+        printed = screen.getvalue()
+
+        for column in ("Quality", "Size", "Kind"):
+            assert column in printed
+
+        assert "Host" not in printed
+
+    def test_a_long_label_is_not_cut(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        The old cell sliced the label at 34 characters whatever the
+        terminal was, so a 140-column window showed the same truncated
+        text as an 80-column one.
+        """
+
+        label = "1080p Hindi WEB-DL x264 AAC 2.0 Chapter 12 (2024)"
+
+        flow.render_options(_item(), [_option(label=label)])
+
+        assert label in screen.getvalue()
+
+    def test_the_cursor_row_is_marked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        table = flow.option_table(
+            [_option(label="480p"), _option(label="720p")],
+            cursor=1,
+        )
+
+        assert [row.style for row in table.rows] == [
+            None,
+            "bold reverse",
+        ]
+
+    def test_no_cursor_marks_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        table = flow.option_table([_option()])
+
+        assert [row.style for row in table.rows] == [None]
+
+    def test_the_help_line_says_what_the_keys_do(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        flow.render_options(_item(), [_option()])
+
+        printed = screen.getvalue()
+
+        for key in ("move", "choose", "downloads", "streams", "back"):
+            assert key in printed
+
+
+class TestChooseOptionByKey:
+    """
+    The arrow-key picker, driven through a real terminal.
+
+    pytest's stdin is not a tty, which is correct -- it is how every
+    other picker test reaches the typed-number path -- and it is also
+    why this class swaps in a pty. Handing a key sequence to
+    ``keys.read_key`` directly would skip the half that breaks: raw
+    mode, and whether the terminal delivers an arrow key as one
+    keypress or three.
+    """
+
+    def _pick(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        options: list[MediaOption],
+        keys_pressed: bytes,
+    ) -> MediaOption | None:
+        controller, terminal = _pty_stream()
+
+        monkeypatch.setattr(sys, "stdin", terminal)
+
+        buffer = io.StringIO()
+
+        monkeypatch.setattr(
+            ui,
+            "console",
+            Console(
+                file=buffer,
+                force_terminal=False,
+                width=100,
+                no_color=True,
+            ),
+        )
+        monkeypatch.setattr(flow, "console", ui.console)
+
+        def press() -> None:
+            for chunk in _as_chunks(keys_pressed):
+                os.write(controller, chunk)
+                time.sleep(keys_mod.SEQUENCE_TIMEOUT * 4)
+
+        reader = threading.Thread(target=press)
+        reader.start()
+
+        try:
+            chosen = flow.choose_option(options)
+
+        finally:
+            reader.join(timeout=5)
+            os.close(controller)
+            terminal.close()
+
+        return chosen
+
+    def test_down_then_enter_takes_the_second(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        options = [_option(label="480p"), _option(label="720p")]
+
+        chosen = self._pick(
+            monkeypatch,
+            options,
+            b"\x1b[B\r",
+        )
+
+        assert chosen is not None
+        assert chosen.label == "720p"
+
+    def test_up_wraps_to_the_last(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Wrapping is what makes a long list usable: the cursor can stop
+        where it likes without the ends being dead space.
+        """
+
+        options = [_option(label="a"), _option(label="b")]
+
+        chosen = self._pick(monkeypatch, options, b"\x1b[A\r")
+
+        assert chosen is not None
+        assert chosen.label == "b"
+
+    def test_escape_goes_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert self._pick(
+            monkeypatch,
+            [_option()],
+            b"\x1b",
+        ) is None
+
+    def test_quit_unwinds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        with pytest.raises(flow.QuitFlow):
+            self._pick(monkeypatch, [_option()], b"q")
+
+    def test_d_narrows_to_downloads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        options = [
+            _option(label="stream-a", kind="streaming"),
+            _option(label="stream-b", kind="streaming"),
+            _option(label="file", kind="download"),
+        ]
+
+        chosen = self._pick(
+            monkeypatch,
+            options,
+            b"d\r",
+        )
+
+        assert chosen is not None
+        assert chosen.label == "file"
+
+    def test_a_typed_number_still_works(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        A terminal can be driven by typing as well as by pointing. If
+        the arrow keys were the only way in, the picker would be
+        unusable for anyone whose terminal does not send them.
+        """
+
+        options = [_option(label="480p"), _option(label="720p")]
+
+        chosen = self._pick(monkeypatch, options, b"2")
+
+        assert chosen is not None
+        assert chosen.label == "720p"
+
+    def test_a_filter_with_nothing_to_show_keeps_the_list(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        "s" on a downloads-only post used to leave an empty table with
+        quit as the only way out.
+        """
+
+        chosen = self._pick(
+            monkeypatch,
+            [_option(label="file", kind="download")],
+            b"s\r",
+        )
+
+        assert chosen is not None
+        assert chosen.label == "file"
 
 
 class TestChooseOption:
