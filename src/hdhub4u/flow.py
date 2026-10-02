@@ -22,7 +22,6 @@ from __future__ import annotations
 from typing import Sequence
 
 import httpx
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -33,7 +32,7 @@ from .catalog import (
     SITE_ORIGIN,
     CatalogItem,
     MediaOption,
-    search_catalog,
+    search_page,
 )
 from .downloader import (
     clear_progress_line,
@@ -46,14 +45,13 @@ from .project import get_downloads_dir
 from .ui import (
     ResultRow,
     clear_screen,
+    console,
     pause,
     print_error,
     print_header,
     print_results,
     print_table_results,
 )
-
-console = Console()
 
 APP_TITLE = "HDHUB4U"
 
@@ -130,18 +128,26 @@ def render_results(
     items: Sequence[CatalogItem],
     query: str,
     page: int,
+    total: int = 0,
 ) -> None:
     """
     Print a numbered result table.
 
     A thin adapter over the shared table renderer, so the interactive
     list, a piped listing and ``--json`` are the same rows.
+
+    Args:
+        items: The results to draw.
+        query: The query they came from.
+        page: 1-based result page.
+        total: Matches the service reported, or zero if it said none.
     """
 
     print_table_results(
         as_rows(items),
         query=query,
         page=page,
+        total=total,
     )
 
 
@@ -602,7 +608,7 @@ def browse_results(
 
     while True:
         try:
-            items = search_catalog(
+            found = search_page(
                 query,
                 limit=limit,
                 page=page,
@@ -613,11 +619,18 @@ def browse_results(
             print_error(f"Search failed.\n{error}")
             return BACK
 
+        items = found.items
+
         clear_screen()
 
         print_header(APP_TITLE, f'Search: "{query}"')
 
-        render_results(items, query, page)
+        render_results(
+            items,
+            query,
+            page,
+            found.total,
+        )
 
         console.print()
         console.print(" [bold]Enter result number[/bold]")
@@ -692,7 +705,7 @@ def run_search(
     try:
         if not interactive:
             try:
-                items = search_catalog(
+                found = search_page(
                     query,
                     limit=limit,
                     client=http_client,
@@ -703,12 +716,13 @@ def run_search(
                 return 1
 
             print_results(
-                as_rows(items),
+                as_rows(found.items),
                 query=query,
                 as_json=as_json,
+                total=found.total,
             )
 
-            return 0 if items else 1
+            return 0 if found.items else 1
 
         outcome = browse_results(
             query,

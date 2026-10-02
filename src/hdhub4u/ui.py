@@ -96,14 +96,25 @@ def print_json_results(
     rows: Sequence[ResultRow],
     *,
     query: str,
+    total: int = 0,
 ) -> None:
     """
     Print results as a single JSON object.
 
     A documented shape, always wrapped in an object with ``query``,
-    ``count`` and ``results``, so an empty result set is still valid
-    JSON. Emitting nothing at all when there are no matches is what a
-    consumer cannot read.
+    ``count``, ``total`` and ``results``, so an empty result set is
+    still valid JSON. Emitting nothing at all when there are no
+    matches is what a consumer cannot read.
+
+    ``count`` and ``total`` are different numbers and both are
+    reported. ``total`` is null when the search service sent no
+    count, which is not the same as a count of zero -- and is the only
+    honest way to say "this search was not counted".
+
+    Args:
+        rows: The results to print.
+        query: The query they came from.
+        total: Matches the service reported, or zero if it said none.
     """
 
     print(
@@ -111,6 +122,7 @@ def print_json_results(
             {
                 "query": query,
                 "count": len(rows),
+                "total": total or None,
                 "results": [
                     row.as_dict() for row in rows
                 ],
@@ -121,12 +133,41 @@ def print_json_results(
     )
 
 
-#: Display names for the machine kinds a row carries, so the table
-#: reads properly while ``--json`` keeps a stable lowercase value.
-KIND_LABELS = {
-    "series": "Series",
-    "movie": "Movie",
-}
+def page_footer(
+    rows: Sequence[ResultRow],
+    *,
+    page: int = 1,
+    total: int = 0,
+) -> str:
+    """
+    Return the line printed under a result table.
+
+    The page and the size of the search are different numbers, and
+    the total is reported only when the search service actually sent
+    one. Deriving it from the page size would mean telling somebody a
+    search found fourteen things because one page held fourteen rows,
+    which is how a count stops meaning a count.
+
+    The offline index reports no total, because a fuzzy match over
+    SQLite rows is scored in Python and there is no query to count.
+
+    Args:
+        rows: The rows on this page.
+        page: 1-based page number.
+        total: Matches the service reported, or zero if it said none.
+
+    Returns:
+        A one-line summary, already styled for a terminal.
+    """
+
+    line = f"page {page} · {len(rows)} shown"
+
+    if total > 0:
+        noun = "match" if total == 1 else "matches"
+
+        line = f"{line} · {total} {noun}"
+
+    return f"[dim]{line}[/dim]"
 
 
 def print_table_results(
@@ -134,13 +175,32 @@ def print_table_results(
     *,
     query: str = "",
     page: int = 1,
+    total: int = 0,
 ) -> None:
     """
     Draw results as a table for a terminal.
 
+    Three columns and no fixed title width. The table is asked to
+    expand and the title is left unbounded, so it wraps and absorbs
+    whatever room there is.
+
+    The columns that were here before summed to about 106 characters
+    once the borders were counted. On an 80-column terminal that did
+    not clip, which is the easy thing to assume: the terminal did it.
+    Rich kept every character and the right border simply left the
+    screen, so quality text ran off the edge and the table lost its
+    frame. Three columns fit with room to spare, and above about 100
+    columns the title now spreads instead of leaving the table at 90.
+
     An empty result set gets a panel saying so rather than a table
     with a header and no rows, which reads as a rendering fault
     instead of a fact about the search.
+
+    Args:
+        rows: The results to draw.
+        query: The query they came from, for the empty case.
+        page: 1-based page number, for the footer.
+        total: Matches the service reported, or zero if it said none.
     """
 
     if not rows:
@@ -164,7 +224,7 @@ def print_table_results(
         show_header=True,
         header_style="bold cyan",
         border_style="dim",
-        expand=False,
+        expand=True,
     )
 
     table.add_column(
@@ -172,23 +232,11 @@ def print_table_results(
         justify="right",
         width=4,
     )
-    table.add_column(
-        "Title",
-        min_width=34,
-        max_width=58,
-    )
+    table.add_column("Title")
     table.add_column(
         "Year",
         justify="right",
         width=6,
-    )
-    table.add_column(
-        "Type",
-        width=12,
-    )
-    table.add_column(
-        "Quality",
-        width=18,
     )
 
     for number, row in enumerate(rows, start=1):
@@ -198,14 +246,10 @@ def print_table_results(
             str(number),
             Text(row.title),
             Text(row.year or "-"),
-            KIND_LABELS.get(row.kind, "-"),
-            row.quality or "-",
         )
 
     console.print(table)
-    console.print(
-        f"[dim]page {page} · {len(rows)} shown[/dim]"
-    )
+    console.print(page_footer(rows, page=page, total=total))
 
 
 def print_results(
@@ -214,6 +258,7 @@ def print_results(
     query: str,
     as_json: bool = False,
     page: int = 1,
+    total: int = 0,
 ) -> None:
     """
     Print results to whichever destination asked for them.
@@ -229,13 +274,19 @@ def print_results(
         query: The query they came from, echoed in JSON output.
         as_json: Emit one JSON object instead of a table.
         page: 1-based result page, shown in the table footer.
+        total: Matches the service reported, or zero if it said none.
     """
 
     if as_json:
-        print_json_results(rows, query=query)
+        print_json_results(rows, query=query, total=total)
 
     elif wants_table():
-        print_table_results(rows, query=query, page=page)
+        print_table_results(
+            rows,
+            query=query,
+            page=page,
+            total=total,
+        )
 
     else:
         print_plain_results(rows, query=query)

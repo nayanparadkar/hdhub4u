@@ -23,9 +23,9 @@ entirely by the host it points at. So options are classified by host.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -223,15 +223,42 @@ def _today_tag() -> str:
     return date.today().isoformat()
 
 
-def search_catalog(
+@dataclass(frozen=True)
+class SearchPage:
+    """
+    One page of results, plus the total the search service reported.
+
+    The two are different numbers and conflating them is how a footer
+    ends up claiming a search found fourteen things because one page
+    held fourteen rows. ``total`` is zero when the payload carried no
+    count, which is not the same as a count of zero: zero results is
+    an empty ``items``, and no count at all is a ``total`` of zero
+    beside a full page.
+
+    The offline index cannot supply a total -- a fuzzy match over
+    SQLite rows is scored in Python, so there is no query to count --
+    which is why ``total`` is optional rather than required.
+    """
+
+    items: list[CatalogItem] = field(default_factory=list)
+    total: int = 0
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self) -> Iterator[CatalogItem]:
+        return iter(self.items)
+
+
+def search_page(
     query: str,
     *,
     limit: int = DEFAULT_LIMIT,
     page: int = 1,
     client: httpx.Client | None = None,
-) -> list[CatalogItem]:
+) -> SearchPage:
     """
-    Search the live catalog.
+    Search the live catalog and keep the total alongside the results.
 
     Args:
         query: Free text, matched the way the website matches it.
@@ -240,7 +267,7 @@ def search_catalog(
         client: Optional caller-owned HTTP client.
 
     Returns:
-        Results in the site's own order, newest first.
+        One page of results in the site's own order, newest first.
 
     Raises:
         NetworkError: when the endpoint is unreachable.
@@ -250,7 +277,7 @@ def search_catalog(
     term = query.strip()
 
     if not term:
-        return []
+        return SearchPage()
 
     params = {
         "q": term,
@@ -303,7 +330,47 @@ def search_catalog(
         if owned:
             http_client.close()
 
-    return _items_from_payload(payload)
+    return SearchPage(
+        items=_items_from_payload(payload),
+        total=result_count(payload),
+    )
+
+
+def search_catalog(
+    query: str,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    page: int = 1,
+    client: httpx.Client | None = None,
+) -> list[CatalogItem]:
+    """
+    Search the live catalog.
+
+    A thin wrapper over :func:`search_page` for callers that want only
+    the rows. Anything that renders a result list wants the total too,
+    so a footer can report the size of the search rather than the size
+    of the page.
+
+    Args:
+        query: Free text, matched the way the website matches it.
+        limit: Maximum results to return, clamped to 50.
+        page: 1-based result page.
+        client: Optional caller-owned HTTP client.
+
+    Returns:
+        Results in the site's own order, newest first.
+
+    Raises:
+        NetworkError: when the endpoint is unreachable.
+        ParseError: when the payload is not a search response.
+    """
+
+    return search_page(
+        query,
+        limit=limit,
+        page=page,
+        client=client,
+    ).items
 
 
 def popular_searches(

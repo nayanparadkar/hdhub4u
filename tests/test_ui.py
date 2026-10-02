@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 
+import pytest
 from rich.console import Console
 
 from hdhub4u import ui
@@ -39,6 +40,35 @@ def _rows() -> list[ResultRow]:
             kind="movie",
             quality="1080P",
             year="2024",
+        ),
+    ]
+
+
+def _wide_rows() -> list[ResultRow]:
+    """Rows with the detail real search results carry."""
+
+    return [
+        ResultRow(
+            title="Dune: Part Two",
+            url="https://site.test/dune-2",
+            kind="movie",
+            quality="2160p HDRip WEB-DL x264 5.1 - DDP5 1",
+            year="2024",
+        ),
+        ResultRow(
+            title=(
+                "Big Boss Season 1 Complete "
+                "Hindi S01E01-S25 1080p WEB-DL"
+            ),
+            url="https://site.test/big-boss",
+            kind="series",
+            quality="1080P 720P",
+            year="2010",
+        ),
+        ResultRow(
+            title="Avengers: Endgame",
+            url="https://site.test/avengers",
+            kind="movie",
         ),
     ]
 
@@ -199,7 +229,29 @@ class TestJsonResults:
 
         assert payload["query"] == "big boss"
         assert payload["count"] == 2
+        assert payload["total"] is None
         assert len(payload["results"]) == 2
+
+    def test_a_reported_total_is_carried_through(
+        self,
+        capsys,
+    ) -> None:
+        """
+        count is the page; total is the search. Reporting both, and
+        null when the service counted nothing, is what lets a script
+        page without ever guessing.
+        """
+
+        print_json_results(
+            _rows(),
+            query="big boss",
+            total=240,
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload["count"] == 2
+        assert payload["total"] == 240
 
     def test_every_field_a_table_hides_is_present(
         self,
@@ -385,6 +437,219 @@ class TestWantsTable:
         )
 
         assert ui.wants_table() is True
+
+
+class TestPageFooter:
+    def test_it_reports_the_page_and_the_page_size(self) -> None:
+        assert (
+            ui.page_footer(_rows(), page=1)
+            == "[dim]page 1 \u00b7 2 shown[/dim]"
+        )
+
+    def test_an_unreported_total_is_left_out(self) -> None:
+        """
+        The offline index cannot count a fuzzy match, so saying "0
+        matches" beside a full page would be a lie. The count is the
+        one thing here that has to be real.
+        """
+
+        assert "matches" not in ui.page_footer(
+            _rows(),
+            total=0,
+        )
+
+    def test_a_reported_total_is_shown(self) -> None:
+        assert ui.page_footer(_rows(), total=137).endswith(
+            "\u00b7 137 matches[/dim]"
+        )
+
+    def test_a_single_match_is_not_plural(self) -> None:
+        assert ui.page_footer(_rows(), total=1).endswith(
+            "· 1 match[/dim]"
+        )
+
+
+class TestTableResults:
+    """
+    The table is the first thing a user sees and the easiest place to
+    get something quietly wrong, because a table that overflows looks
+    like a table that simply has a lot in it.
+    """
+
+    def _render(self, monkeypatch, rows, width, **kwargs) -> str:
+        monkeypatch.setattr(
+            ui,
+            "console",
+            Console(
+                file=(buffer := io.StringIO()),
+                force_terminal=False,
+                width=width,
+                no_color=True,
+            ),
+        )
+
+        ui.print_table_results(rows, **kwargs)
+
+        return buffer.getvalue()
+
+    @pytest.mark.parametrize(
+        "width",
+        [60, 70, 80, 100, 120, 200],
+    )
+    def test_the_table_fits_the_terminal(
+        self,
+        monkeypatch,
+        width: int,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            _wide_rows(),
+            width,
+            query="dune",
+        )
+
+        too_long = [
+            line
+            for line in printed.splitlines()
+            if len(line) > width
+        ]
+
+        assert too_long == []
+
+    @pytest.mark.parametrize(
+        "width",
+        [60, 70, 80, 100, 120, 200],
+    )
+    def test_every_row_is_framed(
+        self,
+        monkeypatch,
+        width: int,
+    ) -> None:
+        """
+        The old five-column table summed to about 106 characters with
+        its borders. Rich never clipped it -- the right border walked
+        off the screen at 80 columns, so the frame was simply gone.
+        """
+
+        printed = self._render(
+            monkeypatch,
+            _wide_rows(),
+            width,
+            query="dune",
+        )
+
+        table_lines = [
+            line
+            for line in printed.splitlines()
+            if "Dune" in line or "Big Boss" in line
+        ]
+
+        assert table_lines
+        assert all(
+            line.startswith("\u2502") and line.endswith("\u2502")
+            for line in table_lines
+        )
+
+    def test_only_three_columns_are_drawn(
+        self,
+        monkeypatch,
+    ) -> None:
+        """
+        Quality and kind still reach a script through --json. They do
+        not need to compete with the title for a terminal.
+        """
+
+        printed = self._render(
+            monkeypatch,
+            _rows(),
+            100,
+            query="big boss",
+        )
+
+        header = printed.splitlines()[1]
+
+        assert "Title" in header
+        assert "Year" in header
+        assert "Type" not in header
+        assert "Quality" not in header
+        assert "1080P 720P" not in printed
+
+    def test_a_long_title_is_kept_whole(
+        self,
+        monkeypatch,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            _wide_rows(),
+            60,
+            query="big boss",
+        )
+
+        squeezed = printed.replace("\n", "")
+
+        # Wrapped across lines, not truncated.
+        assert "Big Boss Season 1 Complete Hindi" in squeezed
+
+    def test_a_row_with_no_year_shows_a_dash(
+        self,
+        monkeypatch,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            [
+                ResultRow(
+                    title="Untitled Documentary",
+                    url="https://site.test/c",
+                ),
+            ],
+            100,
+            query="doc",
+        )
+
+        assert "Untitled Documentary" in printed
+
+    def test_the_footer_carries_a_reported_total(
+        self,
+        monkeypatch,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            _rows(),
+            100,
+            query="big boss",
+            page=3,
+            total=240,
+        )
+
+        assert "page 3 \u00b7 2 shown \u00b7 240 matches" in printed
+
+    def test_the_footer_omits_an_unknown_total(
+        self,
+        monkeypatch,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            _rows(),
+            100,
+            query="big boss",
+        )
+
+        assert "page 1 \u00b7 2 shown" in printed
+        assert "matches" not in printed
+
+    def test_no_results_is_a_panel_not_an_empty_table(
+        self,
+        monkeypatch,
+    ) -> None:
+        printed = self._render(
+            monkeypatch,
+            [],
+            100,
+            query="asdfgh",
+        )
+
+        assert "\u250f" not in printed
+        assert "Nothing matched" in printed
 
 
 class TestCopyToClipboard:

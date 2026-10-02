@@ -12,6 +12,7 @@ markup, both of which fail in ways a user sees immediately.
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
 
 import httpx
@@ -19,7 +20,11 @@ import pytest
 from rich.console import Console
 
 from hdhub4u import flow, ui
-from hdhub4u.catalog import CatalogItem, MediaOption
+from hdhub4u.catalog import (
+    CatalogItem,
+    MediaOption,
+    SearchPage,
+)
 from hdhub4u.errors import DownloadError, NetworkError, ResolutionError
 from hdhub4u.flow import (
     AGAIN,
@@ -77,9 +82,11 @@ def screen(
 
     monkeypatch.setattr(flow, "console", console)
 
-    # print_error and print_header arrive as imported names and write
-    # through ui's own console, so that one has to be captured too or
-    # half of what the user would see goes missing from the test.
+    # print_error and print_header are imported names that resolve
+    # ui.console at call time, so ui's own global has to be captured
+    # too. Both now hold the one Console the application uses; the
+    # two attributes are patched separately only because rebinding a
+    # module global does not reach a name already imported from it.
     monkeypatch.setattr(ui, "console", console)
 
     monkeypatch.setattr(
@@ -540,8 +547,8 @@ class TestRunSearch:
 
         monkeypatch.setattr(
             flow,
-            "search_catalog",
-            lambda *a, **k: [],
+            "search_page",
+            lambda *a, **k: SearchPage(),
         )
 
         assert (
@@ -560,8 +567,8 @@ class TestRunSearch:
     ) -> None:
         monkeypatch.setattr(
             flow,
-            "search_catalog",
-            lambda *a, **k: [_item()],
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
         )
 
         assert (
@@ -581,7 +588,7 @@ class TestRunSearch:
         def failing(*args, **kwargs):
             raise NetworkError("the site did not answer")
 
-        monkeypatch.setattr(flow, "search_catalog", failing)
+        monkeypatch.setattr(flow, "search_page", failing)
 
         assert (
             flow.run_search(
@@ -727,6 +734,23 @@ class TestShowTitle:
         assert flow.show_title(_item(), [_option()]) == AGAIN
 
 
+class TestOneConsole:
+    def test_the_flow_and_the_ui_share_one_console(self) -> None:
+        """
+        Two Console objects meant two width decisions, and Rich
+        measures width per console -- so a table could be laid out for
+        one width while the panel above it was drawn for another.
+        """
+
+        assert flow.console is ui.console
+
+    def test_the_flow_prints_nothing_else(
+        self,
+        capsys,
+    ) -> None:
+        assert flow.console.file is sys.stdout
+
+
 class TestBrowseResults:
     def test_paging_asks_the_catalog_for_the_next_page(
         self,
@@ -737,9 +761,9 @@ class TestBrowseResults:
 
         def fake_search(query, limit=20, page=1, client=None):
             pages.append(page)
-            return [_item()]
+            return SearchPage([_item()])
 
-        monkeypatch.setattr(flow, "search_catalog", fake_search)
+        monkeypatch.setattr(flow, "search_page", fake_search)
 
         replies = iter(["n", "q"])
         monkeypatch.setattr(
@@ -762,8 +786,8 @@ class TestBrowseResults:
     ) -> None:
         monkeypatch.setattr(
             flow,
-            "search_catalog",
-            lambda *a, **k: [_item()],
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
         )
 
         replies = iter(["b", "q"])
@@ -789,7 +813,7 @@ class TestBrowseResults:
         def failing(*args, **kwargs):
             raise NetworkError("the site did not answer")
 
-        monkeypatch.setattr(flow, "search_catalog", failing)
+        monkeypatch.setattr(flow, "search_page", failing)
 
         assert (
             flow.browse_results(
@@ -806,8 +830,8 @@ class TestBrowseResults:
     ) -> None:
         monkeypatch.setattr(
             flow,
-            "search_catalog",
-            lambda *a, **k: [_item()],
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
         )
         monkeypatch.setattr(
             flow,

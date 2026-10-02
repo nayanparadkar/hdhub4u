@@ -18,6 +18,7 @@ from hdhub4u.catalog import (
     registrable_host,
     result_count,
     search_catalog,
+    search_page,
     title_quality,
 )
 from hdhub4u.errors import NetworkError, ParseError
@@ -515,6 +516,74 @@ class TestResultCount:
         assert result_count({"found": "x"}) == 0
         assert result_count([]) == 0
         assert result_count(None) == 0
+
+
+class TestSearchPage:
+    def test_keeps_the_total_the_service_reported(self) -> None:
+        """
+        The page size and the search size are different numbers, and
+        the only way a footer can report the size of a search is if
+        something carries it out of the payload.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _response(SEARCH_PAYLOAD)
+
+        found = search_page("dune", client=_client(handler))
+
+        assert found.total == 2
+        assert len(found.items) == 2
+
+    def test_an_uncounted_payload_reports_no_total(self) -> None:
+        """
+        A missing count is not a count of zero. Zero results is an
+        empty page; an uncounted one is a full page beside no number.
+        """
+
+        payload = {
+            "hits": SEARCH_PAYLOAD["hits"],
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _response(payload)
+
+        found = search_page("dune", client=_client(handler))
+
+        assert found.total == 0
+        assert len(found.items) == 2
+
+    def test_an_empty_query_is_an_empty_uncounted_page(self) -> None:
+        found = search_page("   ")
+
+        assert list(found) == []
+        assert found.total == 0
+
+    def test_it_behaves_like_a_sequence(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _response(SEARCH_PAYLOAD)
+
+        found = search_page("dune", client=_client(handler))
+
+        assert [item.title for item in found] == [
+            "Dune: Part Two (2024) WEB-DL 1080p",
+            "Dune: Prophecy Season 1",
+        ]
+        assert [item.year for item in found] == ["2024", ""]
+
+    def test_search_catalog_still_returns_only_the_items(self) -> None:
+        """
+        The count is only useful to a caller that renders a list, so
+        the plain list accessor keeps its old shape.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return _response(SEARCH_PAYLOAD)
+
+        items = search_catalog("dune", client=_client(handler))
+
+        assert isinstance(items, list)
+        assert len(items) == 2
+        assert items[0].year == "2024"
 
 
 def test_option_dataclass_defaults() -> None:

@@ -53,6 +53,11 @@ Type a name, pick a result, pick a quality, confirm, and the file lands
 in `downloads/`. `n` goes to the next page of results, `b` starts a new
 search, `q` quits.
 
+The result list is three columns: number, title, year. Quality and type
+are still in the output a script reads, and in the picker's own table
+once a result is chosen. The list is laid out to the terminal it is on,
+so it fits an 80-column window as well as a maximised one.
+
 ### Scriptable
 
 ```bash
@@ -76,6 +81,7 @@ $ hdhub4u search "big boss" | grep '^ '
 {
   "query": "big boss",
   "count": 1,
+  "total": 412,
   "results": [
     {
       "title": "Big Boss (2021) WEB-DL 1080p",
@@ -89,8 +95,11 @@ $ hdhub4u search "big boss" | grep '^ '
 ```
 
 `type` and `quality` are carried here even when the table leaves them
-out for width. An empty result set is still valid JSON, with
-`"count": 0`. `NO_COLOR` and `FORCE_COLOR` are both honoured.
+out for width. `count` is the page and `total` is the whole search;
+`total` is `null` when the search service reported no count, which is
+different from a count of zero. An empty result set is still valid
+JSON, with `"count": 0`. `NO_COLOR` and `FORCE_COLOR` are both
+honoured.
 
 Exit codes are `0` on success (including a deliberate quit), `1` when
 nothing was found or a step failed, and `130` on interrupt, so a
