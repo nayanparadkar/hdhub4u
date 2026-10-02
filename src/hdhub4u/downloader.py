@@ -685,27 +685,6 @@ def format_duration(
     return f"{int(hours // 24)}d"
 
 
-def format_progress(
-    downloaded: int,
-    total: int | None,
-) -> str:
-    """Create a human-readable download progress string."""
-
-    downloaded_text = format_bytes(downloaded)
-
-    if total is None or total <= 0:
-        return f"Downloaded: {downloaded_text}"
-
-    percentage = (downloaded / total) * 100
-
-    return (
-        f"Downloaded: "
-        f"{downloaded_text} / "
-        f"{format_bytes(total)} "
-        f"({percentage:.1f}%)"
-    )
-
-
 #: Longest and shortest a progress bar may be, whatever the terminal.
 #: The shortest is where the numbers start being the bar; the longest
 #: is where a bar becomes a progress picture nobody reads the numbers
@@ -1003,19 +982,6 @@ class TransferProgress:
             ),
             flush=True,
         )
-
-
-def print_download_progress(
-    downloaded: int,
-    total: int | None,
-) -> None:
-    """Print download progress on a single terminal line."""
-
-    print(
-        f"\r{render_progress_bar(downloaded, total)}",
-        end="",
-        flush=True,
-    )
 
 
 def clear_progress_line() -> None:

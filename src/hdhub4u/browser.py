@@ -76,35 +76,6 @@ class RenderedPage:
         return len(self.html) < 500
 
 
-def is_browser_available() -> bool:
-    """
-    Return True when a usable browser is installed.
-
-    Checks both the Playwright package and the browser binaries,
-    because the package alone is present on a fresh install while
-    ``playwright install`` has not been run.
-    """
-
-    try:
-        from playwright.sync_api import (
-            sync_playwright,
-        )
-
-    except ImportError:
-        return False
-
-    try:
-        with sync_playwright() as driver:
-            browser = driver.chromium.launch()
-
-            browser.close()
-
-    except Exception:
-        return False
-
-    return True
-
-
 def browser_status() -> str:
     """
     Return a one-line description of browser availability.
@@ -467,38 +438,6 @@ class BrowserSession:
                 )
 
         return destination
-
-
-def render_page(
-    url: str,
-    *,
-    session: BrowserSession | None = None,
-    wait_for: str | None = None,
-    settle_ms: int = DEFAULT_SETTLE_MS,
-    headless: bool = True,
-) -> RenderedPage:
-    """
-    Render one page, opening a session if none is supplied.
-
-    Convenience wrapper for one-off use. A crawl should open a
-    single :class:`BrowserSession` and reuse it.
-    """
-
-    if session is not None:
-        return session.render(
-            url,
-            wait_for=wait_for,
-            settle_ms=settle_ms,
-        )
-
-    with BrowserSession(
-        headless=headless
-    ) as opened:
-        return opened.render(
-            url,
-            wait_for=wait_for,
-            settle_ms=settle_ms,
-        )
 
 
 _SHELL_MARKERS = re.compile(

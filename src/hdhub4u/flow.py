@@ -91,6 +91,10 @@ MEDIA_EXTENSIONS = frozenset(
     }
 )
 
+#: The Escape character. Also delivered as a key name by the
+#: arrow-key picker; a typed one reaches _prompt as this byte.
+ESCAPE = "\x1b"
+
 QUIT_WORDS = frozenset({"q", "quit", "exit"})
 BACK_WORDS = frozenset({"b", "back"})
 
@@ -119,6 +123,96 @@ def _prompt(
 
     except (EOFError, KeyboardInterrupt):
         return None
+
+
+def _prompt_result(
+    message: str,
+) -> str | None:
+    """
+    Read one answer at the result prompt, Escape included.
+
+    ``input()`` reads in canonical mode, where the terminal holds on
+    to a lone Escape and never delivers it. Verified on a pty: one
+    Escape was echoed and the read went on blocking, so the Escape
+    documented on the results screen did nothing unless Enter followed
+    it. Reading a key at a time is what makes the documented key the
+    real key.
+
+    Digits are accumulated until Enter rather than acted on at once. A
+    read per keystroke fires on the ``1`` of a ``10`` and selects the
+    wrong title, and pages run to twenty.
+
+    Echo is off in raw mode, so each key is echoed here as it is
+    accepted. Backspace erases in place for the same reason a terminal
+    would.
+
+    Falls back to :func:`_prompt` wherever raw input is unavailable,
+    so a pipe keeps working exactly as before.
+
+    Args:
+        message: The prompt to draw.
+
+    Returns:
+        The answer as typed, the name of the key pressed for a key
+        that is not text, or None when input ends.
+    """
+
+    if not keys.can_read_keys():
+        return _prompt(message)
+
+    answer = ""
+
+    console.print(
+        Text(message),
+        end="",
+    )
+
+    while True:
+        try:
+            key = keys.read_key()
+
+        except QuitFlow:
+            return None
+
+        if key is None:
+            return None
+
+        if key == "enter":
+            console.print()
+
+            return answer
+
+        if key == "esc":
+            console.print()
+
+            return "esc"
+
+        if key in QUIT_WORDS or key in BACK_WORDS:
+            console.print()
+
+            return key
+
+        if key == "backspace":
+            if answer:
+                answer = answer[:-1]
+
+                console.print(
+                    Text("\b \b"),
+                    end="",
+                )
+
+            continue
+
+        if len(key) == 1 and key.isprintable() and not key.isspace():
+            answer += key
+
+            console.print(
+                Text(
+                    key,
+                    style="bold",
+                ),
+                end="",
+            )
 
 
 def _ask(
@@ -793,11 +887,27 @@ def show_title(
         pause("\nPress Enter to go back...")
         return "again"
 
-    start_download(item, option, client=client)
+    downloaded = start_download(
+        item,
+        option,
+        client=client,
+    )
+
+    # A finished download goes straight back to the results. It used to
+    # stop here and ask for Enter, then drop the user onto the option
+    # table again, so getting back to the list took two keys and a
+    # re-read of the post page -- for somebody picking up another title
+    # out of the same twenty results.
+    #
+    # A failed one stays. Losing the menu on a dead link means picking
+    # the quality, the resolution and the gate again to try the next
+    # one, which is the moment it most costs to be sent away.
+    if downloaded:
+        return BACK
 
     pause("\nPress Enter to go back...")
 
-    return "again"
+    return AGAIN
 
 
 def browse_results(
@@ -850,16 +960,20 @@ def browse_results(
         console.print(" [bold]Enter result number[/bold]")
         console.print(" [bold]n[/bold]  Next page")
         console.print(" [bold]b[/bold]  New search")
+        console.print(" [bold]Esc[/bold]  New search")
         console.print(" [bold]q[/bold]  Quit")
 
-        raw = _prompt("> ")
+        raw = _prompt_result("> ")
 
         if raw is None or raw.lower() in QUIT_WORDS:
             return QUIT
 
         value = raw.strip().lower()
 
-        if value in BACK_WORDS:
+        # Escape goes back as well as "b", because on a keyboard
+        # Escape is what the muscle memory reaches for and a key that
+        # is listed but does nothing is worse than one that is absent.
+        if value in BACK_WORDS or value == "esc" or ESCAPE in value:
             return BACK
 
         if value == "n":
@@ -878,7 +992,9 @@ def browse_results(
             client,
         )
 
-        page = 1
+        # The page is deliberately kept. Coming back from a download
+        # should land on the list it was started from, not on page one
+        # of a search that had already been scrolled to twenty.
 
 
 def run_search(

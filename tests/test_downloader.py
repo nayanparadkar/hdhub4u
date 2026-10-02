@@ -17,7 +17,6 @@ from hdhub4u.downloader import (
     create_output_filename,
     format_bytes,
     format_duration,
-    format_progress,
     render_progress_bar,
     sanitize_filename,
     shorten_directory_name,
@@ -96,20 +95,6 @@ class TestFormatBytes:
         assert format_bytes(value).endswith(
             expected_unit
         )
-
-
-class TestFormatProgress:
-    def test_includes_percentage(self) -> None:
-        result = format_progress(500, 1000)
-
-        assert "50.0%" in result
-
-    def test_handles_unknown_total(self) -> None:
-        for total in (None, 0, -1):
-            assert "Downloaded:" in format_progress(
-                500,
-                total,
-            )
 
 
 class TestRenderProgressBar:

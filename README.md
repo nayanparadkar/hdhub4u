@@ -53,8 +53,11 @@ are the same thing. A title with spaces needs quotes:
 `hdhub4u "the big boss"`.
 
 Type a name, pick a result, pick a quality, confirm, and the file lands
-in `downloads/`. `n` goes to the next page of results, `b` starts a new
-search, `q` quits.
+in `downloads/`. The list comes straight back when the download finishes,
+on the page it was started from, ready for the next pick. `n` goes to the
+next page of results, `b` or `Esc` starts a new search, `q` quits.
+Digits are typed and confirmed with Enter, so a two-digit pick such as
+`10` is one pick and not two.
 
 The result list is three columns: number, title, year. Quality and type
 are still in the output a script reads, and in the picker's own table
@@ -64,9 +67,10 @@ so it fits an 80-column window as well as a maximised one.
 Picking an option is done with the arrow keys, and the list redraws as
 the cursor moves so the sizes stay side by side. `Enter` chooses, `d`
 and `s` narrow to downloads or streams, `a` shows everything again, `b`
-goes back and `q` quits. Typing a number still works everywhere, so
-there is always a way through that is not the arrow keys. On a pipe,
-where a terminal cannot be put into raw mode, typing is the only path.
+or `Esc` goes back to the results and `q` quits. Typing a number still
+works everywhere, so there is always a way through that is not the
+arrow keys. On a pipe, where a terminal cannot be put into raw mode,
+typing is the only path.
 
 ### While it waits
 

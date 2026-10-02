@@ -932,6 +932,145 @@ class TestRunSearch:
         )
 
 
+class TestEscapeAndPaging:
+    def test_escape_goes_back_to_the_search_prompt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Escape is the key the muscle memory reaches for. It was listed
+        nowhere and did nothing except print "Enter a result number",
+        which reads as the program having ignored the key.
+        """
+
+        monkeypatch.setattr(
+            flow,
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
+        )
+        monkeypatch.setattr(
+            flow,
+            "_prompt",
+            lambda *a, **k: "\x1b",
+        )
+
+        assert (
+            flow.browse_results(
+                "dune",
+                client=httpx.Client(),
+            )
+            == BACK
+        )
+
+    def test_escape_as_a_key_name_reaches_the_search_prompt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        On a terminal the Escape arrives as the name "esc", not as the
+        byte, so the check that used to look for the byte would have
+        missed the case that matters most.
+        """
+
+        monkeypatch.setattr(
+            flow,
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
+        )
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(flow.keys, "read_key", lambda *a, **k: "esc")
+
+        assert (
+            flow.browse_results(
+                "dune",
+                client=httpx.Client(),
+            )
+            == BACK
+        )
+
+    def test_the_help_line_offers_escape(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        monkeypatch.setattr(
+            flow,
+            "search_page",
+            lambda *a, **k: SearchPage([_item()]),
+        )
+        monkeypatch.setattr(
+            flow,
+            "_prompt",
+            lambda *a, **k: "q",
+        )
+
+        flow.browse_results("dune", client=httpx.Client())
+
+        assert "Esc" in screen.getvalue()
+
+    def test_a_download_keeps_the_page_it_came_from(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Coming back from a download used to reset the page, so picking
+        a second title out of page three landed on page one.
+        """
+
+        pages: list[int] = []
+
+        def fake_search(query, limit=20, page=1, client=None):
+            pages.append(page)
+
+            return SearchPage([_item()])
+
+        monkeypatch.setattr(flow, "search_page", fake_search)
+        monkeypatch.setattr(flow, "_handle_selection", lambda *a: None)
+
+        replies = iter(["n", "1", "q"])
+        monkeypatch.setattr(
+            flow,
+            "_prompt",
+            lambda *a, **k: next(replies),
+        )
+
+        flow.browse_results("dune", client=httpx.Client())
+
+        assert pages == [1, 2, 2]
+
+    def test_a_search_of_nothing_still_reaches_the_prompt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        There is no cursor to pick and nothing to go back to, but a
+        search that found nothing is not a reason to quit.
+        """
+
+        monkeypatch.setattr(
+            flow,
+            "search_page",
+            lambda *a, **k: SearchPage(),
+        )
+        monkeypatch.setattr(
+            flow,
+            "_prompt",
+            lambda *a, **k: "\x1b",
+        )
+
+        assert (
+            flow.browse_results(
+                "asdfgh",
+                client=httpx.Client(),
+            )
+            == BACK
+        )
+
+
 class TestShowTitle:
     def test_no_options_returns_to_the_results(
         self,
@@ -1001,7 +1140,216 @@ class TestShowTitle:
         )
         monkeypatch.setattr(flow, "pause", lambda *a, **k: None)
 
+        # A finished download goes back to the results, not to the
+        # option table it was started from.
+        assert flow.show_title(_item(), [_option()]) == BACK
+
+    def test_a_failed_download_keeps_the_menu(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        A dead link is the moment it most costs to be sent away: the
+        quality, the resolution and the gate would all have to be
+        chosen again to try the next option.
+        """
+
+        monkeypatch.setattr(
+            flow,
+            "choose_option",
+            lambda options: _option(),
+        )
+        monkeypatch.setattr(
+            flow,
+            "start_download",
+            lambda item, option, client=None: False,
+        )
+        monkeypatch.setattr(flow, "pause", lambda *a, **k: None)
+
         assert flow.show_title(_item(), [_option()]) == AGAIN
+
+    def test_a_finished_download_does_not_pause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        It used to stop and ask for Enter, so getting back to the
+        results took two keys and a re-read of the post page.
+        """
+
+        monkeypatch.setattr(
+            flow,
+            "choose_option",
+            lambda options: _option(),
+        )
+        monkeypatch.setattr(
+            flow,
+            "start_download",
+            lambda item, option, client=None: True,
+        )
+
+        paused: list[str] = []
+
+        monkeypatch.setattr(
+            flow,
+            "pause",
+            lambda message="": paused.append(message),
+        )
+
+        flow.show_title(_item(), [_option()])
+
+        assert paused == []
+
+
+class TestResultPromptOnARealTerminal:
+    """
+    What the results prompt does with real keys, on a real tty.
+
+    A string cannot show either of these failures. That ``input()``
+    holds a lone Escape until Enter, and that a read per keystroke
+    fires on the "1" of a "10", are both facts about the terminal
+    driver, and both were live bugs before these tests existed.
+    """
+
+    @pytest.mark.skipif(
+        not hasattr(os, "openpty"),
+        reason="no pty on this platform",
+    )
+    def test_a_bare_escape_comes_back_at_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Verified by hand on a pty before this test existed: one Escape
+        was echoed and input() went on blocking, so the Escape printed
+        on the results screen did nothing without an Enter after it.
+        """
+
+        controller, terminal = _pty_stream()
+
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(flow.keys, "read_key", lambda *a, **k: "esc")
+
+        assert flow._prompt_result("> ") == "esc"
+
+        os.close(controller)
+
+    @pytest.mark.skipif(
+        not hasattr(os, "openpty"),
+        reason="no pty on this platform",
+    )
+    def test_two_digits_are_one_number(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Reading a key at a time acts on the "1" of a "10" and selects
+        title one instead of title ten. Pages run to twenty, so this
+        is not an edge case.
+        """
+
+        keys_seen = iter(["1", "0", "enter"])
+
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(
+            flow.keys,
+            "read_key",
+            lambda *a, **k: next(keys_seen),
+        )
+
+        assert flow._prompt_result("> ") == "10"
+
+    @pytest.mark.skipif(
+        not hasattr(os, "openpty"),
+        reason="no pty on this platform",
+    )
+    def test_backspace_erases(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        keys_seen = iter(["1", "9", "backspace", "5", "enter"])
+
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(
+            flow.keys,
+            "read_key",
+            lambda *a, **k: next(keys_seen),
+        )
+
+        assert flow._prompt_result("> ") == "15"
+
+    def test_a_pipe_still_reads_a_line(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Without a tty there is no raw mode, so the line reader stays
+        and nothing about piping changes.
+        """
+
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: False)
+        monkeypatch.setattr(flow, "_prompt", lambda *a, **k: "10")
+
+        assert flow._prompt_result("> ") == "10"
+
+    def test_end_of_input_is_not_an_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(flow.keys, "read_key", lambda *a, **k: None)
+
+        assert flow._prompt_result("> ") is None
+
+    # No "b" or "q" in these: a bare letter is a documented shortcut
+    # here, so "[bold]" would leave at the "b" and never be typed out.
+    @pytest.mark.parametrize(
+        "typed",
+        ["[", "[/]", "[red]", "[strong]"],
+    )
+    def test_a_bracket_does_not_reach_the_markup_parser(
+        self,
+        typed: str,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        """
+        Echoing the typed key through console.print() made Rich read it
+        as markup, and "[/]" raised MarkupError and took the whole
+        interactive session down with a traceback. A user only has to
+        type a bracket.
+        """
+
+        # A bracket reaches the prompt one key at a time, the way a
+        # person types it. The crash was on the closing one.
+        keys_seen = iter([*typed, "enter"])
+
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+        monkeypatch.setattr(
+            flow.keys,
+            "read_key",
+            lambda *a, **k: next(keys_seen),
+        )
+
+        assert flow._prompt_result("> ") == typed
+
+    def test_quit_and_back_pass_through(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        screen: io.StringIO,
+    ) -> None:
+        monkeypatch.setattr(flow.keys, "can_read_keys", lambda: True)
+
+        for key, expected in (("q", "q"), ("b", "b")):
+            monkeypatch.setattr(flow.keys, "read_key", lambda *a, **k: key)
+
+            assert flow._prompt_result("> ") == expected
 
 
 class TestOneConsole:

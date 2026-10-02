@@ -30,12 +30,6 @@ INDEX_TITLE = (
 )
 
 
-def get_database_path_or_default() -> Path:
-    """Return the configured index path."""
-
-    return get_database_path()
-
-
 @contextmanager
 def connection(
     path: Path | None = None,
@@ -79,28 +73,6 @@ def connection(
 
     finally:
         conn.close()
-
-
-def get_connection() -> sqlite3.Connection:
-    """
-    Open a standalone connection.
-
-    Kept for callers that manage their own transaction scope. Prefer
-    :func:`connection` elsewhere.
-    """
-
-    database_path = get_database_path()
-
-    database_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    conn = sqlite3.connect(database_path)
-
-    conn.row_factory = sqlite3.Row
-
-    return conn
 
 
 def initialize_database() -> None:
@@ -269,15 +241,6 @@ def placeholder_title_count() -> int:
         ).fetchone()
 
     return int(row[0])
-
-
-def iter_media() -> Iterator[sqlite3.Row]:
-    """Yield every indexed row."""
-
-    with connection() as conn:
-        yield from conn.execute(
-            "SELECT * FROM media ORDER BY id"
-        ).fetchall()
 
 
 def backfill_titles(
